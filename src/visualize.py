@@ -24,7 +24,7 @@ from typing import Iterable, Optional
 import numpy as np
 
 from .atom_trajectory import AtomEnsemble
-from .atoms import Grid
+from .atom_config import Grid
 from .ripa_freq import RIPASpec, nu_col, nu_row
 from .sequence import Sequence
 from .segments import Segment

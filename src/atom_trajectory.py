@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .atoms import AtomConfig, Grid
+from .atom_config import AtomConfig, Grid
 from .segments import Segment
 
 
@@ -114,8 +114,7 @@ class AtomEnsemble:
     @classmethod
     def from_config(cls, cfg: AtomConfig) -> "AtomEnsemble":
         atoms = [
-            AtomTrajectory(atom_id=int(aid),
-                           initial_pos=(int(p[0]), int(p[1])))
+            AtomTrajectory(atom_id=int(aid), initial_pos=(int(p[0]), int(p[1])))
             for p, aid in zip(cfg.positions, cfg.atom_ids)
         ]
         return cls(grid=cfg.grid, atoms=atoms)

@@ -16,8 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from .atoms import AtomConfig
-
+from .atom_config import AtomConfig
 
 Site = tuple[int, int]
 
@@ -25,8 +24,8 @@ Site = tuple[int, int]
 @dataclass
 class RoutingRequest:
     initial: AtomConfig
-    targets: Optional[set[Site]] = None              # case 1
-    pairing: Optional[dict[Site, Site]] = None       # case 2: src_site -> tgt_site
+    targets: Optional[set[Site]] = None  # case 1
+    pairing: Optional[dict[Site, Site]] = None  # case 2: src_site -> tgt_site
 
     def __post_init__(self):
         if (self.targets is None) == (self.pairing is None):

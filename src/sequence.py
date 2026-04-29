@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .atoms import AtomConfig
+from .atom_config import AtomConfig
 from .atom_trajectory import AtomEnsemble
 from .movement import Step
 from .segments import Segment
@@ -83,7 +83,7 @@ class Sequence:
         before = {a.atom_id: len(a.segments) for a in self.ensemble.atoms}
         step.apply(self.ensemble)
         new = {
-            a.atom_id: a.segments[before[a.atom_id]:]
+            a.atom_id: a.segments[before[a.atom_id] :]
             for a in self.ensemble.atoms
             if len(a.segments) > before[a.atom_id]
         }
@@ -121,7 +121,7 @@ class Sequence:
             before = {a.atom_id: len(a.segments) for a in fresh.atoms}
             step.apply(fresh)
             new = {
-                a.atom_id: a.segments[before[a.atom_id]:]
+                a.atom_id: a.segments[before[a.atom_id] :]
                 for a in fresh.atoms
                 if len(a.segments) > before[a.atom_id]
             }

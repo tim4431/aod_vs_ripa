@@ -19,18 +19,18 @@ import math
 from dataclasses import dataclass, field
 from typing import Iterable, Sequence as TypingSequence
 
-from ..atoms import AtomConfig
+from ..atom_config import AtomConfig
 from ..atom_trajectory import AtomEnsemble
 from ..routing import RoutingRequest, Site
 from ..sequence import Sequence
 from .aod_primitives import LatticeMove
 from .base import AODScheduler
 
-
 GridMatrix = list[list[int]]
 
 
 # --- public scheduler -------------------------------------------------------
+
 
 @dataclass
 class _PlanState:
@@ -69,17 +69,27 @@ class SqrtTimeAODScheduler(AODScheduler):
 
         if source_grid == target_grid:
             self.last_lattice_moves = []
-            return Sequence(initial=request.initial.copy(), inter_step_gap=self.inter_step_gap)
+            return Sequence(
+                initial=request.initial.copy(), inter_step_gap=self.inter_step_gap
+            )
 
         state = (
-            _hybrid_arbitrary_reconfiguration(source_grid, target_grid, self.use_peephole)
+            _hybrid_arbitrary_reconfiguration(
+                source_grid, target_grid, self.use_peephole
+            )
             if self.prefer_two_step
-            else _three_step_arbitrary_reconfiguration(source_grid, target_grid, self.use_peephole)
+            else _three_step_arbitrary_reconfiguration(
+                source_grid, target_grid, self.use_peephole
+            )
         )
         self.last_lattice_moves = list(state.moves)
-        return self._moves_to_sequence(request.initial, state.moves, expected_grid=target_grid)
+        return self._moves_to_sequence(
+            request.initial, state.moves, expected_grid=target_grid
+        )
 
-    def schedule_to_targets(self, initial: AtomConfig, targets: Iterable[Site]) -> Sequence:
+    def schedule_to_targets(
+        self, initial: AtomConfig, targets: Iterable[Site]
+    ) -> Sequence:
         return self.schedule(RoutingRequest(initial=initial, targets=set(targets)))
 
     def schedule_grid(self, initial: AtomConfig) -> Sequence:
@@ -112,14 +122,20 @@ class SqrtTimeAODScheduler(AODScheduler):
             # Skip lattice ops whose selected (row, col) intersection is
             # empty for our actual atom config — the algorithm emits some
             # of these because it works on a generic occupancy template.
-            if not self.keep_empty_steps and not _move_affects_any_atom(move, seq.ensemble):
+            if not self.keep_empty_steps and not _move_affects_any_atom(
+                move, seq.ensemble
+            ):
                 continue
-            seq.append(move.to_aod_step(start_time=seq.next_start_time(), a_max=self.a_max))
+            seq.append(
+                move.to_aod_step(start_time=seq.next_start_time(), a_max=self.a_max)
+            )
 
         if expected_grid is not None:
             final_grid = _config_to_grid(seq.final_config())
             if final_grid != expected_grid:
-                raise RuntimeError("generated lattice moves did not produce the planned target grid")
+                raise RuntimeError(
+                    "generated lattice moves did not produce the planned target grid"
+                )
         return seq
 
 
@@ -129,6 +145,7 @@ SqrtTimeScheduler = SqrtTimeAODScheduler
 
 
 # --- LatticeMove constructors (one-site shifts in each direction) ------------
+
 
 def _left(rows: Iterable[int], cols: Iterable[int]) -> LatticeMove:
     r, c = tuple(rows), tuple(cols)
@@ -150,12 +167,15 @@ def _down(rows: Iterable[int], cols: Iterable[int]) -> LatticeMove:
     return LatticeMove(r, c, tuple(i + 1 for i in r), c, "down")
 
 
-def _append_if_useful(state: _PlanState, move: LatticeMove, *, force: bool = False) -> None:
+def _append_if_useful(
+    state: _PlanState, move: LatticeMove, *, force: bool = False
+) -> None:
     if force or (move.old_rows and move.old_cols):
         state.moves.append(move)
 
 
 # --- alignments (forward + inverse) -----------------------------------------
+
 
 def _left_alignment(state: _PlanState) -> None:
     h, w = _shape(state.grid)
@@ -211,8 +231,9 @@ def _down_alignment(state: _PlanState) -> None:
     state.grid = new_grid
 
 
-def _inverse_left_alignment(state: _PlanState, target_grid: GridMatrix,
-                            use_peephole: bool = True) -> None:
+def _inverse_left_alignment(
+    state: _PlanState, target_grid: GridMatrix, use_peephole: bool = True
+) -> None:
     h, w = _shape(state.grid)
     remaining = _row_sums(target_grid)
     for c in range(w - 1):
@@ -282,30 +303,38 @@ def _inverse_down_alignment(state: _PlanState, target_grid: GridMatrix) -> None:
 
 # --- reconfigurations -------------------------------------------------------
 
-def _row_wise_reconfiguration(state: _PlanState, target_grid: GridMatrix,
-                              use_peephole: bool = True) -> None:
+
+def _row_wise_reconfiguration(
+    state: _PlanState, target_grid: GridMatrix, use_peephole: bool = True
+) -> None:
     if _row_sums(state.grid) != _row_sums(target_grid):
         raise RuntimeError("row sums do not match")
     _left_alignment(state)
     _inverse_left_alignment(state, target_grid, use_peephole)
 
 
-def _column_wise_reconfiguration(state: _PlanState, target_grid: GridMatrix,
-                                 use_peephole: bool = True) -> None:
+def _column_wise_reconfiguration(
+    state: _PlanState, target_grid: GridMatrix, use_peephole: bool = True
+) -> None:
     if _col_sums(state.grid) != _col_sums(target_grid):
         raise RuntimeError("column sums do not match")
     _up_alignment(state, use_peephole)
     _inverse_up_alignment(state, target_grid)
 
 
-def _partial_row_wise_reconfiguration(state: _PlanState, target_grid: GridMatrix,
-                                      columns_to_configure: int,
-                                      use_peephole: bool = True) -> None:
+def _partial_row_wise_reconfiguration(
+    state: _PlanState,
+    target_grid: GridMatrix,
+    columns_to_configure: int,
+    use_peephole: bool = True,
+) -> None:
     h, w = _shape(state.grid)
     columns_to_configure = min(columns_to_configure, w)
     for r in range(h):
         if sum(state.grid[r]) < sum(target_grid[r][:columns_to_configure]):
-            raise RuntimeError("not enough atoms in source row for partial reconfiguration")
+            raise RuntimeError(
+                "not enough atoms in source row for partial reconfiguration"
+            )
     _left_alignment(state)
     partial_target = _zero_grid(h, w)
     for r in range(h):
@@ -321,13 +350,18 @@ def _partial_row_wise_reconfiguration(state: _PlanState, target_grid: GridMatrix
     _inverse_left_alignment(state, partial_target, use_peephole)
 
 
-def _partial_column_wise_reconfiguration(state: _PlanState, target_grid: GridMatrix,
-                                         rows_to_configure: int) -> None:
+def _partial_column_wise_reconfiguration(
+    state: _PlanState, target_grid: GridMatrix, rows_to_configure: int
+) -> None:
     h, w = _shape(state.grid)
     rows_to_configure = min(rows_to_configure, h)
     for c in range(w):
-        if sum(state.grid[r][c] for r in range(h)) < sum(target_grid[r][c] for r in range(rows_to_configure)):
-            raise RuntimeError("not enough atoms in source column for partial reconfiguration")
+        if sum(state.grid[r][c] for r in range(h)) < sum(
+            target_grid[r][c] for r in range(rows_to_configure)
+        ):
+            raise RuntimeError(
+                "not enough atoms in source column for partial reconfiguration"
+            )
     _up_alignment(state)
     partial_target = _zero_grid(h, w)
     for c in range(w):
@@ -343,8 +377,9 @@ def _partial_column_wise_reconfiguration(state: _PlanState, target_grid: GridMat
     _inverse_up_alignment(state, partial_target)
 
 
-def _three_step_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: GridMatrix,
-                                          use_peephole: bool = True) -> _PlanState:
+def _three_step_arbitrary_reconfiguration(
+    source_grid: GridMatrix, target_grid: GridMatrix, use_peephole: bool = True
+) -> _PlanState:
     _require_same_shape(source_grid, target_grid)
     if _count_atoms(source_grid) != _count_atoms(target_grid):
         raise ValueError("source and target must have the same atom count")
@@ -352,7 +387,9 @@ def _three_step_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: 
     equalized_grid = _create_equalized_configuration(source_grid)
     if not _verify_equalized_property(equalized_grid):
         raise ValueError("equalized property verification failed")
-    intermediate_grid = _construct_matrix(_row_sums(equalized_grid), _col_sums(target_grid))
+    intermediate_grid = _construct_matrix(
+        _row_sums(equalized_grid), _col_sums(target_grid)
+    )
     if not intermediate_grid:
         raise ValueError("Gale-Ryser construction failed")
     _column_wise_reconfiguration(state, equalized_grid, use_peephole)
@@ -362,8 +399,9 @@ def _three_step_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: 
     return state
 
 
-def _two_step_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: GridMatrix,
-                                        use_peephole: bool = True) -> _PlanState:
+def _two_step_arbitrary_reconfiguration(
+    source_grid: GridMatrix, target_grid: GridMatrix, use_peephole: bool = True
+) -> _PlanState:
     _require_same_shape(source_grid, target_grid)
     if _count_atoms(source_grid) != _count_atoms(target_grid):
         raise ValueError("source and target must have the same atom count")
@@ -386,15 +424,22 @@ def _two_step_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: Gr
     raise RuntimeError("two-step arbitrary reconfiguration failed")
 
 
-def _hybrid_arbitrary_reconfiguration(source_grid: GridMatrix, target_grid: GridMatrix,
-                                      use_peephole: bool = True) -> _PlanState:
+def _hybrid_arbitrary_reconfiguration(
+    source_grid: GridMatrix, target_grid: GridMatrix, use_peephole: bool = True
+) -> _PlanState:
     try:
-        return _two_step_arbitrary_reconfiguration(source_grid, target_grid, use_peephole)
+        return _two_step_arbitrary_reconfiguration(
+            source_grid, target_grid, use_peephole
+        )
     except (RuntimeError, ValueError):
-        return _three_step_arbitrary_reconfiguration(source_grid, target_grid, use_peephole)
+        return _three_step_arbitrary_reconfiguration(
+            source_grid, target_grid, use_peephole
+        )
 
 
-def _grid_reconfiguration(source_grid: GridMatrix, use_peephole: bool = True) -> _PlanState:
+def _grid_reconfiguration(
+    source_grid: GridMatrix, use_peephole: bool = True
+) -> _PlanState:
     h, w = _shape(source_grid)
     total_atoms = _count_atoms(source_grid)
     side = int(math.sqrt(total_atoms))
@@ -420,7 +465,9 @@ def _grid_reconfiguration(source_grid: GridMatrix, use_peephole: bool = True) ->
                     placed += 1
             if placed >= total_atoms:
                 break
-        return _three_step_arbitrary_reconfiguration(source_grid, target_grid, use_peephole)
+        return _three_step_arbitrary_reconfiguration(
+            source_grid, target_grid, use_peephole
+        )
 
     intermediate_grid = _zero_grid(h, w)
     target_col = 0
@@ -444,6 +491,7 @@ def _grid_reconfiguration(source_grid: GridMatrix, use_peephole: bool = True) ->
 
 
 # --- Gale-Ryser construction utilities --------------------------------------
+
 
 def _can_construct(row_sums: list[int], col_sums: list[int]) -> bool:
     n = len(row_sums)
@@ -505,6 +553,7 @@ def _verify_equalized_property(equalized_grid: GridMatrix) -> bool:
 
 # --- AtomConfig <-> binary grid bridge --------------------------------------
 
+
 def _config_to_grid(cfg: AtomConfig) -> GridMatrix:
     grid = _zero_grid(cfg.grid.N, cfg.grid.N)
     for pos in cfg.positions:
@@ -525,7 +574,9 @@ def _target_grid(n: int, targets: set[Site]) -> GridMatrix:
     return grid
 
 
-def _integer_site(pos: Iterable[float], n: int, *, tol: float = 1e-9) -> tuple[int, int]:
+def _integer_site(
+    pos: Iterable[float], n: int, *, tol: float = 1e-9
+) -> tuple[int, int]:
     i_f, j_f = pos
     i, j = int(round(float(i_f))), int(round(float(j_f)))
     if abs(float(i_f) - i) > tol or abs(float(j_f) - j) > tol:
@@ -552,6 +603,7 @@ def _move_affects_any_atom(move: LatticeMove, ensemble: AtomEnsemble) -> bool:
 
 
 # --- generic grid utilities -------------------------------------------------
+
 
 def _shape(grid: GridMatrix) -> tuple[int, int]:
     if not grid or not grid[0]:
