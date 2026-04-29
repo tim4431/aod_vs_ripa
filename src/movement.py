@@ -124,7 +124,7 @@ class RIPAStep(Step):
     a_max: float = 1.0
 
     def _move_for(self, ensemble: AtomEnsemble):
-        atom = ensemble.atoms[self.atom_id]
+        atom = ensemble.atom_by_id(self.atom_id)
         current = atom.resting_position_at(self.start_time)
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]

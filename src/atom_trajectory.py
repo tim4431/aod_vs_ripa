@@ -94,21 +94,42 @@ class AtomEnsemble:
     """Collection of `AtomTrajectory`s sharing one Grid.
 
     Built from an `AtomConfig` (initial state). Steps mutate this object
-    by appending segments to atoms' trajectories.
+    by appending segments to atoms' trajectories. The list `atoms` is
+    kept in the same order as the source `AtomConfig.positions`; lookup
+    by `atom_id` is via `atom_by_id` (O(1) through the cached id index).
     """
 
     grid: Grid
     atoms: list[AtomTrajectory] = field(default_factory=list)
+    _id_index: dict[int, int] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self):
+        self._rebuild_id_index()
+
+    def _rebuild_id_index(self) -> None:
+        self._id_index = {a.atom_id: k for k, a in enumerate(self.atoms)}
+        if len(self._id_index) != len(self.atoms):
+            raise ValueError("AtomEnsemble: atom_ids must be unique")
 
     @classmethod
     def from_config(cls, cfg: AtomConfig) -> "AtomEnsemble":
         atoms = [
-            AtomTrajectory(atom_id=k, initial_pos=(int(p[0]), int(p[1])))
-            for k, p in enumerate(cfg.positions)
+            AtomTrajectory(atom_id=int(aid),
+                           initial_pos=(int(p[0]), int(p[1])))
+            for p, aid in zip(cfg.positions, cfg.atom_ids)
         ]
         return cls(grid=cfg.grid, atoms=atoms)
 
     # ---- queries ------------------------------------------------------------
+
+    def atom_by_id(self, atom_id: int) -> AtomTrajectory:
+        """Look up an atom by its `atom_id` (not by list index)."""
+        return self.atoms[self._id_index[int(atom_id)]]
+
+    def index_of(self, atom_id: int) -> int:
+        """List-index of the atom with the given `atom_id`. Useful when
+        you need to align with `positions_at` / `xy_at` row order."""
+        return self._id_index[int(atom_id)]
 
     def positions_at(self, t: float) -> np.ndarray:
         """All atom positions at time t, shape (M, 2), in grid units (float)."""
@@ -133,8 +154,10 @@ class AtomEnsemble:
         return occ
 
     def final_config(self) -> AtomConfig:
+        """Snapshot of final resting positions, preserving atom_ids."""
         positions = np.array([a.final_pos for a in self.atoms], dtype=int)
-        return AtomConfig(grid=self.grid, positions=positions)
+        atom_ids = np.array([a.atom_id for a in self.atoms], dtype=int)
+        return AtomConfig(grid=self.grid, positions=positions, atom_ids=atom_ids)
 
     def moving_intervals(self) -> list[tuple[float, float]]:
         """Merged time intervals during which any atom is moving.

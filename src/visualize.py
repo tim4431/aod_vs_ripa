@@ -79,14 +79,16 @@ def draw_atoms(
 ):
     """Atoms at time t. Held atoms get a red edge (and an optional blob)."""
     xy = ensemble.xy_at(t)
-    held_set = set(
+    held_ids = set(
         int(k) for k in (held if held is not None else _held_atom_indices(ensemble, t))
     )
-    edges = [edgecolor_held if k in held_set else "none" for k in range(len(xy))]
-    lws = [1.5 if k in held_set else 0.0 for k in range(len(xy))]
+    # `xy` aligns with `ensemble.atoms` list order; map atom_id -> list index.
+    held_idx = {ensemble.index_of(aid) for aid in held_ids}
+    edges = [edgecolor_held if k in held_idx else "none" for k in range(len(xy))]
+    lws = [1.5 if k in held_idx else 0.0 for k in range(len(xy))]
     face = colors if colors is not None else ["k"] * len(xy)
-    if not fast and held_set:
-        held_xy = xy[sorted(held_set)]
+    if not fast and held_idx:
+        held_xy = xy[sorted(held_idx)]
         ax.scatter(
             held_xy[:, 0], held_xy[:, 1], s=size * 6, c="red", alpha=0.18, zorder=2
         )
@@ -242,7 +244,7 @@ def _render_frame(args):
 
     if spec is not None:
         held = _held_atom_indices(ensemble, t)
-        held_pos = [ensemble.atoms[k].position_at(t) for k in held]
+        held_pos = [ensemble.atom_by_id(k).position_at(t) for k in held]
         # Split tones by which channel is currently driving each atom.
         row_active = {
             atom.atom_id
@@ -260,8 +262,8 @@ def _render_frame(args):
             and seg.start_time <= t <= seg.end_time
             and seg.duration > 0
         }
-        row_pos = [ensemble.atoms[k].position_at(t) for k in row_active]
-        col_pos = [ensemble.atoms[k].position_at(t) for k in col_active]
+        row_pos = [ensemble.atom_by_id(k).position_at(t) for k in row_active]
+        col_pos = [ensemble.atom_by_id(k).position_at(t) for k in col_active]
         draw_tone_stems(
             ax_row, [nu_row(i, j, spec) for i, j in row_pos], FSR1=spec.FSR1
         )
