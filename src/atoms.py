@@ -7,6 +7,7 @@ Stores the (i, j) location of each atom plus optional labels.
 Positions are stored as floats so an `AtomConfig` can also describe
 mid-flight states sampled along trajectories.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,7 +15,18 @@ from typing import Hashable, Optional
 
 import numpy as np
 
-from .geometry import Grid
+
+@dataclass(frozen=True)
+class Grid:
+    N: int  # grid is N x N
+    d: float  # site spacing [um]
+    rc: float  # collision radius [um]; rc <= d in normal regimes
+
+    def ij_to_xy(self, i: float, j: float) -> tuple[float, float]:
+        """Map (possibly fractional) site index to physical coords, centered."""
+        # Center the grid: site (N-1)/2 maps to 0.
+        c = (self.N - 1) / 2.0
+        return (i - c) * self.d, (j - c) * self.d
 
 
 @dataclass
