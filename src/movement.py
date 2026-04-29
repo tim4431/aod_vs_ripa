@@ -1,126 +1,145 @@
-"""MovementStep: one atomic chunk of motion executed by the hardware.
+"""Step types: how the scheduler tells the hardware to move atoms.
 
-Two flavors:
+Both step types subclass `Step` and share one effect: they append
+`Trajectory` segments to the relevant `AtomTrajectory`s in an
+`AtomEnsemble`. They differ in how they pick atoms and shape moves:
 
-* `RIPAStep` — RIPA-SLM addresses each atom independently, so the step is
-  *natively* a list of per-atom trajectories. Atoms move along a single
-  row OR column at a time (the row/col channel of the EOM); diagonal
-  moves are decomposed by the scheduler into multiple steps with
-  hand-offs at integer (i, j).
+* `AODStep` — synchronous lattice operation. Defined by selected
+  rows/cols and their new positions; only atoms at the cartesian
+  product (selected_rows x selected_cols) are moved, all sharing one
+  start_time and one duration (set by the longest move).
 
-* `AODStep` — Crossed AODs can only stretch / translate whole rows and
-  columns without crossing. The native description is therefore two
-  monotone permutations: `row_map[r] = r'` and `col_map[c] = c'`. We
-  expand that into per-atom trajectories so downstream code (validator,
-  visualizer, timing) can treat both backends uniformly.
+* `RIPAStep` — single-atom move, addressed by `atom_id`. Travels along
+  one EOM channel ('row' moves along x with j fixed, 'col' moves along
+  y with i fixed). Diagonals must be split into multiple RIPASteps.
+
+Steps carry their own absolute `start_time`. Schedulers compute it from
+the ensemble's running `total_duration()` plus any inter-step gap.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Literal
 
-import numpy as np
-
-from .atoms import AtomConfig
-from .trajectories import Trajectory, hold, straight_move
+from .atom_trajectory import AtomEnsemble
+from .trajectories import bang_bang_duration, make_segment
 
 
-# --- RIPA -------------------------------------------------------------------
+class Step(ABC):
+    """Abstract step. Subclasses implement `apply(ensemble)`."""
 
-@dataclass
-class RIPAStep:
-    """One RIPA move: a set of per-atom trajectories.
+    start_time: float
 
-    `channel` records which EOM channel carries each atom ('row' moves
-    along x, 'col' moves along y). All trajectories in one step start at
-    t=0 (relative); absolute timing comes from the parent Sequence.
-    """
-    trajectories: list[Trajectory]                # one per moved atom
-    atom_indices: list[int]                       # which atom in AtomConfig
-    channel: list[Literal["row", "col"]]          # 'row' or 'col' per traj
+    @abstractmethod
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        """Append trajectory segments to the relevant atoms in `ensemble`."""
 
-    @property
-    def duration(self) -> float:
-        return max((tr.duration for tr in self.trajectories), default=0.0)
-
-    def apply(self, cfg: AtomConfig) -> AtomConfig:
-        """Return a new AtomConfig with moved atoms at their endpoints."""
-        new = cfg.copy()
-        for k, tr in zip(self.atom_indices, self.trajectories):
-            new.positions[k] = tr.end
-        return new
+    @abstractmethod
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        """Latest end_time of any segment this step would emit. May depend on
+        the ensemble state at `start_time`. Used by the scheduler to chain
+        consecutive steps."""
 
 
 # --- AOD --------------------------------------------------------------------
 
 @dataclass
-class AODStep:
-    """One AOD move described as monotone row/col remaps.
+class AODStep(Step):
+    """Synchronous AOD lattice op.
 
-    `row_map`/`col_map` are *partial* maps: only entries for rows/cols
-    that actually move need appear, but the maps must remain *strictly
-    monotone* (no crossings) when combined with the identity on the
-    untouched indices. Atoms sitting on a moved row inherit the row's
-    new index (likewise for columns).
+    The AOD addresses the cartesian product `selected_rows x selected_cols`
+    via one RF tone per row and one per col. Atoms sitting at any of those
+    intersections move together; their (row, col) indices remap to the
+    matching entries in `new_rows`, `new_cols`. Lengths must match.
+
+    Monotonicity (no row/col crossings) is the caller's responsibility —
+    the sqrt-time scheduler emits monotone shifts by construction.
     """
-    row_map: dict[int, float] = field(default_factory=dict)
-    col_map: dict[int, float] = field(default_factory=dict)
-    a_max: float = 1.0  # grid-units / s^2; bang-bang acceleration cap
+    start_time: float
+    selected_rows: tuple[int, ...]
+    selected_cols: tuple[int, ...]
+    new_rows: tuple[int, ...]
+    new_cols: tuple[int, ...]
+    a_max: float = 1.0
 
-    def _validate_monotone(self, m: dict[int, float], N: int) -> None:
-        # Effective map after filling in identity for untouched indices.
-        full = [(r, m.get(r, float(r))) for r in range(N)]
-        for (r1, v1), (r2, v2) in zip(full, full[1:]):
-            if v1 >= v2:
-                raise ValueError(f"AOD map not strictly monotone at {r1}->{v1}, {r2}->{v2}")
+    def __post_init__(self):
+        if len(self.selected_rows) != len(self.new_rows):
+            raise ValueError("selected_rows and new_rows must have the same length")
+        if len(self.selected_cols) != len(self.new_cols):
+            raise ValueError("selected_cols and new_cols must have the same length")
 
-    def to_trajectories(self, cfg: AtomConfig) -> tuple[list[Trajectory], list[int]]:
-        """Expand the row/col remap into per-atom straight-line moves."""
-        self._validate_monotone(self.row_map, cfg.grid.N)
-        self._validate_monotone(self.col_map, cfg.grid.N)
+    def _affected(self, ensemble: AtomEnsemble):
+        """Yield (atom, old_site, new_site) for atoms hit by the lattice op."""
+        row_map = dict(zip(self.selected_rows, self.new_rows))
+        col_map = dict(zip(self.selected_cols, self.new_cols))
+        sel_r = set(self.selected_rows)
+        sel_c = set(self.selected_cols)
+        for atom in ensemble.atoms:
+            i, j = atom.resting_position_at(self.start_time)
+            if i in sel_r and j in sel_c:
+                yield atom, (i, j), (row_map[i], col_map[j])
 
-        trajs: list[Trajectory] = []
-        idxs: list[int] = []
-        for k, (i, j) in enumerate(cfg.positions):
-            ri, rj = int(round(i)), int(round(j))
-            new_i = self.row_map.get(ri, float(i))
-            new_j = self.col_map.get(rj, float(j))
-            if (new_i, new_j) == (i, j):
-                continue
-            trajs.append(straight_move((float(i), float(j)),
-                                       (float(new_i), float(new_j)),
-                                       self.a_max))
-            idxs.append(k)
-        return trajs, idxs
+    def _shared_duration(self, ensemble: AtomEnsemble) -> float:
+        """Duration of the AOD op = bang-bang time of the longest atom move."""
+        max_L = 0.0
+        for _, (i, j), (ni, nj) in self._affected(ensemble):
+            max_L = max(max_L, math.hypot(ni - i, nj - j))
+        return bang_bang_duration(max_L, self.a_max)
 
-    def to_ripa_step(self, cfg: AtomConfig) -> RIPAStep:
-        """Convenience: lift to a RIPAStep so a uniform validator can run.
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        T = self._shared_duration(ensemble)
+        if T == 0:
+            return  # nobody moves; nothing to record
+        for atom, start, end in self._affected(ensemble):
+            seg = make_segment(start, end, self.start_time, self.a_max,
+                               duration=T, channel="aod")
+            atom.append(seg)
 
-        Channel is set to 'row' if the move is purely horizontal, 'col'
-        if purely vertical, else 'row' as a default (AOD diagonals don't
-        actually use EOM channels, but we keep the field for uniformity).
-        """
-        trajs, idxs = self.to_trajectories(cfg)
-        chans: list[Literal["row", "col"]] = []
-        for tr in trajs:
-            di = tr.end[0] - tr.start[0]
-            dj = tr.end[1] - tr.start[1]
-            chans.append("col" if abs(dj) > abs(di) else "row")
-        return RIPAStep(trajs, idxs, chans)
-
-    @property
-    def duration(self) -> float:
-        # Caller can compute via to_trajectories(cfg); kept as 0.0 placeholder.
-        return 0.0
-
-    def apply(self, cfg: AtomConfig) -> AtomConfig:
-        """Apply the row/col remap directly (no need to integrate trajectories)."""
-        new = cfg.copy()
-        for k, (i, j) in enumerate(cfg.positions):
-            ri, rj = int(round(i)), int(round(j))
-            new.positions[k, 0] = self.row_map.get(ri, i)
-            new.positions[k, 1] = self.col_map.get(rj, j)
-        return new
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        return self.start_time + self._shared_duration(ensemble)
 
 
-MovementStep = RIPAStep | AODStep
+# --- RIPA -------------------------------------------------------------------
+
+@dataclass
+class RIPAStep(Step):
+    """Single-atom RIPA move along one EOM channel.
+
+    `channel` selects the row channel ('row', moves along x with j fixed)
+    or the col channel ('col', moves along y with i fixed). Diagonal moves
+    are not allowed and must be split.
+    """
+    start_time: float
+    atom_id: int
+    target: tuple[int, int]
+    channel: Literal["row", "col"]
+    a_max: float = 1.0
+
+    def _move_for(self, ensemble: AtomEnsemble):
+        atom = ensemble.atoms[self.atom_id]
+        current = atom.resting_position_at(self.start_time)
+        di = self.target[0] - current[0]
+        dj = self.target[1] - current[1]
+        if self.channel == "row" and dj != 0:
+            raise ValueError(f"row-channel move must keep j fixed; got {current}->{self.target}")
+        if self.channel == "col" and di != 0:
+            raise ValueError(f"col-channel move must keep i fixed; got {current}->{self.target}")
+        return atom, current
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        atom, current = self._move_for(ensemble)
+        if current == tuple(self.target):
+            return
+        seg = make_segment(current, tuple(self.target), self.start_time,
+                           self.a_max, channel=self.channel)
+        atom.append(seg)
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        _, current = self._move_for(ensemble)
+        di = self.target[0] - current[0]
+        dj = self.target[1] - current[1]
+        L = math.hypot(di, dj)
+        return self.start_time + bang_bang_duration(L, self.a_max)

@@ -5,10 +5,9 @@ atom-reconfiguration algorithm from kotamanegi/sqrt-time-atom-reconfigure.
 The algorithm plans AOD-style lattice shifts: choose rows R, columns C,
 then shift atoms in the Cartesian product R x C by one lattice site.
 
-The rest of this repo currently consumes per-atom trajectories, so the
-concrete scheduler converts each lattice shift into an equivalent
-``RIPAStep`` while keeping the original ``LatticeMove`` objects available
-for callers that want the hardware-level row/column operation.
+Each ``LatticeMove`` is the natural AOD operation; the scheduler emits
+it as an ``AODStep`` (no AOD->RIPA conversion) which appends per-atom
+trajectory segments to the running ``AtomEnsemble`` inside ``Sequence``.
 """
 from __future__ import annotations
 
@@ -16,19 +15,17 @@ import heapq
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Iterable, Literal, Sequence as TypingSequence
-
-import numpy as np
+from typing import Iterable, Sequence as TypingSequence
 
 from .atoms import AtomConfig
+from .atom_trajectory import AtomEnsemble
+from .movement import AODStep
 from .routing import RoutingRequest, Site
 from .sequence import Sequence
-from .movement import RIPAStep
-from .trajectories import straight_move
 
 
 GridMatrix = list[list[int]]
-Direction = Literal["left", "right", "up", "down"]
+Direction = str  # "left" | "right" | "up" | "down"
 
 
 class Scheduler(ABC):
@@ -80,35 +77,22 @@ class LatticeMove:
             "direction": self.direction,
         }
 
-    def to_ripa_step(self, cfg: AtomConfig, *, a_max: float = 1.0) -> RIPAStep:
-        """Expand this lattice shift into per-atom trajectories."""
-        row_map = dict(zip(self.old_rows, self.new_rows))
-        col_map = dict(zip(self.old_cols, self.new_cols))
-        selected_rows = set(self.old_rows)
-        selected_cols = set(self.old_cols)
+    def to_aod_step(self, *, start_time: float, a_max: float = 1.0) -> AODStep:
+        """Wrap this lattice shift in an AODStep ready for a Sequence.
 
-        trajectories = []
-        atom_indices = []
-        channels: list[Literal["row", "col"]] = []
-        next_positions = cfg.positions.copy()
-
-        for k, (i_f, j_f) in enumerate(cfg.positions):
-            i, j = _integer_site((i_f, j_f), cfg.grid.N)
-            if i not in selected_rows or j not in selected_cols:
-                continue
-            new_i = row_map[i]
-            new_j = col_map[j]
-            if not _site_in_bounds(new_i, new_j, cfg.grid.N):
-                raise ValueError(f"lattice move leaves grid at {(new_i, new_j)}")
-            start = (float(i), float(j))
-            end = (float(new_i), float(new_j))
-            trajectories.append(straight_move(start, end, a_max))
-            atom_indices.append(k)
-            channels.append("col" if abs(new_j - j) > abs(new_i - i) else "row")
-            next_positions[k] = end
-
-        _validate_unique_integer_sites(next_positions, cfg.grid.N)
-        return RIPAStep(trajectories=trajectories, atom_indices=atom_indices, channel=channels)
+        The resulting AODStep, when applied to an AtomEnsemble, picks up
+        every atom currently sitting at one of the cartesian-product sites
+        (selected_rows x selected_cols) and moves it to the matching
+        (new_rows x new_cols) position.
+        """
+        return AODStep(
+            start_time=start_time,
+            selected_rows=tuple(self.old_rows),
+            selected_cols=tuple(self.old_cols),
+            new_rows=tuple(self.new_rows),
+            new_cols=tuple(self.new_cols),
+            a_max=a_max,
+        )
 
 
 @dataclass
@@ -189,12 +173,23 @@ class SqrtTimeAODScheduler(AODScheduler):
         expected_grid: GridMatrix | None = None,
     ) -> Sequence:
         seq = Sequence(initial=initial.copy(), inter_step_gap=self.inter_step_gap)
-        cfg = initial.copy()
         for move in moves:
-            step = move.to_ripa_step(cfg, a_max=self.a_max)
-            if step.atom_indices or self.keep_empty_steps:
-                seq.append(step)
-                cfg = step.apply(cfg)
+            # Bounds check on the proposed new sites; cheap to do once.
+            for ni in move.new_rows:
+                if not _site_in_bounds(ni, 0, initial.grid.N):
+                    raise ValueError(f"lattice move leaves grid: row {ni}")
+            for nj in move.new_cols:
+                if not _site_in_bounds(0, nj, initial.grid.N):
+                    raise ValueError(f"lattice move leaves grid: col {nj}")
+
+            # Skip lattice ops whose selected (row, col) intersection is
+            # empty for our actual atom config. The algorithm emits some
+            # of these because it works on a generic occupancy template.
+            if not self.keep_empty_steps and not _move_affects_any_atom(move, seq.ensemble):
+                continue
+
+            step = move.to_aod_step(start_time=seq.next_start_time(), a_max=self.a_max)
+            seq.append(step)
 
         if expected_grid is not None:
             final_grid = _config_to_grid(seq.final_config())
@@ -684,13 +679,16 @@ def _site_in_bounds(i: float, j: float, n: int, *, tol: float = 1e-9) -> bool:
     return -tol <= i <= n - 1 + tol and -tol <= j <= n - 1 + tol
 
 
-def _validate_unique_integer_sites(positions: np.ndarray, n: int) -> None:
-    seen: set[tuple[int, int]] = set()
-    for pos in positions:
-        site = _integer_site(pos, n)
-        if site in seen:
-            raise ValueError(f"lattice move creates duplicate atom at {site}")
-        seen.add(site)
+def _move_affects_any_atom(move: "LatticeMove", ensemble: AtomEnsemble) -> bool:
+    """Does any atom currently sit at a (row, col) selected by `move`?"""
+    sel_r = set(move.old_rows)
+    sel_c = set(move.old_cols)
+    t = ensemble.total_duration()
+    for atom in ensemble.atoms:
+        i, j = atom.resting_position_at(t)
+        if i in sel_r and j in sel_c:
+            return True
+    return False
 
 
 def _shape(grid: GridMatrix) -> tuple[int, int]:

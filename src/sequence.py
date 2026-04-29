@@ -1,73 +1,64 @@
-"""A Sequence is an ordered list of MovementSteps.
+"""Sequence: ordered list of Steps, building an AtomEnsemble incrementally.
 
-Each step gets a start time equal to the cumulative duration of its
-predecessors plus a small inter-step gap (default 0). This is the
-fundamental object schedulers emit and benchmarks read.
+A Sequence owns:
+- the initial AtomConfig (resting state at t=0),
+- an AtomEnsemble that the steps mutate as they're appended,
+- an `inter_step_gap` (e.g. trap settle time) inserted between steps.
+
+Schedulers typically:
+  1. ask `seq.next_start_time()` for the next valid step start_time,
+  2. construct an AODStep / RIPAStep at that time,
+  3. call `seq.append(step)` — which applies the step to the ensemble.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from .atoms import AtomConfig
-from .movement import AODStep, RIPAStep
-from .validator import CollisionReport, validate_step
-
-
-@dataclass
-class TimedStep:
-    step: AODStep | RIPAStep
-    start_time: float
-    duration: float
-
-    @property
-    def end_time(self) -> float:
-        return self.start_time + self.duration
+from .atom_trajectory import AtomEnsemble
+from .movement import Step
+from .validator import CollisionReport, validate_ensemble
 
 
 @dataclass
 class Sequence:
     initial: AtomConfig
-    steps: list[AODStep | RIPAStep] = field(default_factory=list)
-    inter_step_gap: float = 0.0   # seconds between steps (e.g. trap settle time)
+    inter_step_gap: float = 0.0
+    steps: list[Step] = field(default_factory=list)
+    _ensemble: Optional[AtomEnsemble] = None
 
-    def append(self, step: AODStep | RIPAStep) -> None:
-        self.steps.append(step)
+    def __post_init__(self):
+        self._ensemble = AtomEnsemble.from_config(self.initial)
 
-    def timed(self) -> list[TimedStep]:
-        """Resolve concrete (start, duration) for every step.
+    # ---- ensemble access ----------------------------------------------------
 
-        AODStep duration depends on the atom config it acts on, so we
-        propagate the config through the sequence as we go.
-        """
-        out: list[TimedStep] = []
-        cfg = self.initial
-        t = 0.0
-        for step in self.steps:
-            if isinstance(step, AODStep):
-                lifted = step.to_ripa_step(cfg)
-                dur = lifted.duration
-            else:
-                dur = step.duration
-            out.append(TimedStep(step=step, start_time=t, duration=dur))
-            t += dur + self.inter_step_gap
-            cfg = step.apply(cfg)
-        return out
+    @property
+    def ensemble(self) -> AtomEnsemble:
+        assert self._ensemble is not None
+        return self._ensemble
 
     def total_duration(self) -> float:
-        ts = self.timed()
-        return ts[-1].end_time if ts else 0.0
+        return self.ensemble.total_duration()
+
+    def next_start_time(self) -> float:
+        """Earliest valid start_time for a *new* step appended after the
+        current ensemble state, accounting for `inter_step_gap`."""
+        T = self.total_duration()
+        return T + self.inter_step_gap if T > 0 else 0.0
 
     def final_config(self) -> AtomConfig:
-        cfg = self.initial
-        for step in self.steps:
-            cfg = step.apply(cfg)
-        return cfg
+        return self.ensemble.final_config()
 
-    def validate(self, dt: float = 1e-6) -> list[CollisionReport]:
-        """Validate every step in order, threading the config through."""
-        reports: list[CollisionReport] = []
-        cfg = self.initial
-        for step in self.steps:
-            reports.append(validate_step(cfg, step, dt=dt))
-            cfg = step.apply(cfg)
-        return reports
+    # ---- mutation -----------------------------------------------------------
+
+    def append(self, step: Step) -> None:
+        """Apply the step to the running ensemble and remember it."""
+        step.apply(self.ensemble)
+        self.steps.append(step)
+
+    # ---- validation ---------------------------------------------------------
+
+    def validate(self, dt: float = 1e-6) -> CollisionReport:
+        return validate_ensemble(self.ensemble, dt=dt)

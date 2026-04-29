@@ -1,84 +1,76 @@
-"""Trajectory collision validator.
+"""Collision validator over the full ensemble timeline.
 
-Within a single MovementStep we check pairwise distance between every
-pair of moving + stationary atoms at a fine time grid. Two atoms are
-considered colliding if their physical distance drops below `grid.rc`.
+Strategy: sample every atom's `position_at(t)` on a fine time grid, only
+within intervals when at least one atom is moving, plus the segment
+boundaries themselves (so endpoint conflicts are never missed). At each
+sample we do an O(M^2) pairwise distance check against `grid.rc`.
 
-We sample because:
-  - Bang-bang trajectories are smooth (no sharp corners), so missing a
-    collision is unlikely if dt resolves the fastest expected motion.
-  - Non-moving atoms count too: the validator pads the moving list with
-    zero-duration `hold(...)` trajectories for the rest of the array.
-
-For step durations < dt the validator effectively checks endpoints only.
+For typical M ~ 10^2 atoms and a few hundred dt-samples per move this
+is fast enough; tighten/loosen `dt` based on max speed.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import numpy as np
 
-from .atoms import AtomConfig
-from .movement import AODStep, RIPAStep
-from .trajectories import Trajectory, hold
+from .atom_trajectory import AtomEnsemble
 
 
 @dataclass
 class CollisionReport:
     ok: bool
-    # (atom_a, atom_b, t) at the worst (closest) sample, if any pair was below rc.
-    worst_pair: tuple[int, int, float] | None = None
-    worst_distance: float = float("inf")
+    worst_pair: tuple[int, int, float] | None = None  # (atom_a, atom_b, t)
+    worst_distance: float = float("inf")              # in physical um
 
 
-def _expand_to_full(cfg: AtomConfig, step) -> tuple[list[Trajectory], float]:
-    """Return one trajectory per atom in `cfg` and the step duration."""
-    if isinstance(step, AODStep):
-        step_r = step.to_ripa_step(cfg)
-    elif isinstance(step, RIPAStep):
-        step_r = step
-    else:
-        raise TypeError(type(step))
+def _sample_times(ensemble: AtomEnsemble, dt: float) -> np.ndarray:
+    """Time samples that cover every moving interval at spacing `dt`,
+    plus every segment boundary (so we don't miss endpoint collisions)."""
+    intervals = ensemble.moving_intervals()
+    if not intervals:
+        return np.array([0.0])
+    pts: list[float] = []
+    for (s, e) in intervals:
+        n = max(2, int(np.ceil((e - s) / dt)) + 1)
+        pts.extend(np.linspace(s, e, n).tolist())
+    # Add every segment boundary explicitly.
+    for atom in ensemble.atoms:
+        for seg in atom.segments:
+            pts.append(seg.start_time)
+            pts.append(seg.end_time)
+    return np.unique(np.asarray(pts))
 
-    duration = step_r.duration
-    trajs: list[Trajectory] = [hold(tuple(p), duration) for p in cfg.positions]
-    for k, tr in zip(step_r.atom_indices, step_r.trajectories):
-        trajs[k] = tr
-    return trajs, duration
 
-
-def validate_step(cfg: AtomConfig, step, *, dt: float = 1e-6) -> CollisionReport:
-    """Check pairwise collisions over the duration of one step.
-
-    `dt` is the time sample spacing (seconds). 1us is a reasonable
-    default for AOD/RIPA moves that finish in tens to hundreds of us.
-    """
-    trajs, duration = _expand_to_full(cfg, step)
-    if duration <= 0:
+def validate_ensemble(ensemble: AtomEnsemble, *, dt: float = 1e-6) -> CollisionReport:
+    ts = _sample_times(ensemble, dt)
+    if ts.size <= 1:
         return CollisionReport(ok=True)
 
-    n_steps = max(2, int(np.ceil(duration / dt)) + 1)
-    ts = np.linspace(0.0, duration, n_steps)
+    M = len(ensemble.atoms)
+    # Sample (T, M, 2) in grid units, then convert to um.
+    samples = np.empty((len(ts), M, 2))
+    for k, atom in enumerate(ensemble.atoms):
+        for ti, t in enumerate(ts):
+            samples[ti, k] = atom.position_at(float(t))
+    c = (ensemble.grid.N - 1) / 2.0
+    samples = (samples - c) * ensemble.grid.d   # -> um
 
-    # Sample all atoms: shape (T, M, 2) in physical units (um).
-    M = len(trajs)
-    samples = np.empty((n_steps, M, 2))
-    for k, tr in enumerate(trajs):
-        samples[:, k, :] = tr.sample(ts)
-    c = (cfg.grid.N - 1) / 2.0
-    samples = (samples - c) * cfg.grid.d  # to physical um
-
-    # Pairwise min distance across all time samples.
     worst_d = float("inf")
     worst_pair = None
+    rc = ensemble.grid.rc
+    # Vectorize over time per pair to keep memory modest.
     for a in range(M):
         for b in range(a + 1, M):
             diff = samples[:, a, :] - samples[:, b, :]
-            d_min = float(np.min(np.linalg.norm(diff, axis=1)))
+            d = np.linalg.norm(diff, axis=1)
+            ti = int(np.argmin(d))
+            d_min = float(d[ti])
             if d_min < worst_d:
                 worst_d = d_min
-                t_idx = int(np.argmin(np.linalg.norm(diff, axis=1)))
-                worst_pair = (a, b, float(ts[t_idx]))
-
-    ok = worst_d >= cfg.grid.rc
-    return CollisionReport(ok=ok, worst_pair=worst_pair, worst_distance=worst_d)
+                worst_pair = (a, b, float(ts[ti]))
+                if worst_d < rc:
+                    # Keep scanning to find the very worst case (optional).
+                    pass
+    return CollisionReport(ok=worst_d >= rc, worst_pair=worst_pair, worst_distance=worst_d)
