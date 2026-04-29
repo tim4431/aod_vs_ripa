@@ -158,23 +158,3 @@ class AtomEnsemble:
         positions = np.array([a.final_pos for a in self.atoms], dtype=int)
         atom_ids = np.array([a.atom_id for a in self.atoms], dtype=int)
         return AtomConfig(grid=self.grid, positions=positions, atom_ids=atom_ids)
-
-    def moving_intervals(self) -> list[tuple[float, float]]:
-        """Merged time intervals during which any atom is moving.
-
-        Useful so the validator only samples when something is actually
-        in flight rather than across the entire wall-clock duration.
-        """
-        intervals = sorted(
-            (seg.start_time, seg.end_time)
-            for a in self.atoms
-            for seg in a.segments
-            if seg.duration > 0
-        )
-        merged: list[tuple[float, float]] = []
-        for s, e in intervals:
-            if merged and s <= merged[-1][1]:
-                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-            else:
-                merged.append((s, e))
-        return merged
