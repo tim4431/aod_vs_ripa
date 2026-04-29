@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .atom_trajectory import AtomEnsemble
-from .segments import bang_bang_duration, make_segment
+from .segments import bang_bang_duration, make_const_acc_segment
 
 
 class Step(ABC):
@@ -95,10 +95,11 @@ class AODStep(Step):
         T = self._shared_duration(ensemble)
         if T == 0:
             return  # nobody moves; nothing to record
+        # All atoms share the longest move's duration. Shorter moves
+        # therefore run with implied accel = 4*L/T**2 < a_max.
         for atom, start, end in self._affected(ensemble):
-            seg = make_segment(
-                start, end, self.start_time, self.a_max, duration=T, channel="aod"
-            )
+            seg = make_const_acc_segment(start, end, self.start_time,
+                                         duration=T, channel="aod")
             atom.append(seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
@@ -142,13 +143,11 @@ class RIPAStep(Step):
         atom, current = self._move_for(ensemble)
         if current == tuple(self.target):
             return
-        seg = make_segment(
-            current,
-            tuple(self.target),
-            self.start_time,
-            self.a_max,
-            channel=self.channel,
-        )
+        # RIPA single-atom move: run at the step's a_max — schedulers
+        # can drop a_max on individual steps to slow specific atoms.
+        seg = make_const_acc_segment(current, tuple(self.target),
+                                     self.start_time,
+                                     accel=self.a_max, channel=self.channel)
         atom.append(seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:

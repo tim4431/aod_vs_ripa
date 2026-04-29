@@ -47,61 +47,116 @@ class Segment:
 # --- bang-bang helpers -------------------------------------------------------
 
 
-def bang_bang_duration(distance: float, a_max: float) -> float:
-    """Time for symmetric +a/-a profile (no coast) to traverse `distance`.
+def bang_bang_duration(distance: float, accel: float) -> float:
+    """Time for a symmetric +a/-a profile (no coast) to traverse `distance`.
 
-    distance = 2 * (1/2 a (T/2)^2)  =>  T = 2 sqrt(distance / a_max).
+    distance = 2 * (1/2 a (T/2)^2)  =>  T = 2 sqrt(distance / accel).
+
+    `accel` is the *actual* acceleration to run at — not necessarily the
+    hardware ceiling. Schedulers can slow a move below `a_max` whenever
+    they have a reason to (e.g. matching a shared duration across atoms,
+    or honoring a heating budget).
     """
     if distance <= 0:
         return 0.0
-    return 2.0 * math.sqrt(distance / a_max)
+    return 2.0 * math.sqrt(distance / accel)
 
 
-def _bang_bang_pos(t_local: float, T: float, distance: float) -> float:
-    """Scalar position along the move at local time t_local in [0, T]."""
-    if T <= 0:
-        return distance
-    half = T / 2.0
-    a = 4.0 * distance / (T * T)  # the actual accel used
-    if t_local <= half:
-        return 0.5 * a * t_local * t_local
-    tt = t_local - half
-    v_peak = a * half
-    return distance / 2.0 + v_peak * tt - 0.5 * a * tt * tt
+# --- general segment wrapper -------------------------------------------------
+
+# Normalized temporal profile: t_local in [0, duration] -> u in [0, 1] giving
+# the fraction of the straight-line path from start to end that has been
+# covered. profile(0) should be ~0 and profile(duration) should be ~1.
+Profile = Callable[[float], float]
 
 
 def make_segment(
     start: tuple[int, int],
     end: tuple[int, int],
     start_time: float,
-    a_max: float,
+    duration: float,
+    profile: Profile,
     *,
-    duration: Optional[float] = None,
     channel: Optional[Channel] = None,
 ) -> Segment:
-    """Bang-bang segment from `start` to `end` at given absolute start_time.
+    """General segment with an arbitrary temporal profile.
 
-    If `duration` is None, use the natural bang-bang time for the move.
-    Pass `duration` explicitly to share a window across multiple atoms
-    (e.g. an AOD step where every atom's segment shares the longest
-    move's duration; shorter moves then run with reduced acceleration).
+    The atom moves along the straight line from `start` to `end`. The
+    *temporal* shape of the move — how the position maps to time — is
+    given by `profile(t_local) -> u in [0, 1]`. Acceleration is free
+    to vary within the segment (jerk-limited curves, optical-conveyor
+    sweeps, multi-stage profiles, etc.) as long as profile(0) ≈ 0 and
+    profile(duration) ≈ 1.
+
+    For the common bang-bang case use `make_const_acc_segment`.
     """
     di = end[0] - start[0]
     dj = end[1] - start[1]
-    L = math.hypot(di, dj)
-    T = bang_bang_duration(L, a_max) if duration is None else duration
-    ux, uy = (0.0, 0.0) if L == 0 else (di / L, dj / L)
+    s_int = (int(start[0]), int(start[1]))
+    e_int = (int(end[0]), int(end[1]))
 
-    def fn(t: float, _T=T, _L=L, _s=start, _u=(ux, uy)) -> tuple[float, float]:
-        s = _bang_bang_pos(t, _T, _L)
-        return _s[0] + _u[0] * s, _s[1] + _u[1] * s
+    def fn(t: float, _di=di, _dj=dj, _s=s_int, _p=profile) -> tuple[float, float]:
+        u = _p(t)
+        return _s[0] + u * _di, _s[1] + u * _dj
 
     return Segment(
         start_time=start_time,
-        duration=T,
-        start_pos=tuple(map(int, start)),
-        end_pos=tuple(map(int, end)),
+        duration=duration,
+        start_pos=s_int,
+        end_pos=e_int,
         fn=fn,
+        channel=channel,
+    )
+
+
+# --- bang-bang specialization -----------------------------------------------
+
+def _bang_bang_profile(t_local: float, T: float) -> float:
+    """Normalized bang-bang profile: 0 at t=0, 1 at t=T, smooth at t=T/2.
+
+    Derived from constant +a then -a with a = 4L/T^2. Independent of L
+    because the profile is normalized (returns a fraction).
+    """
+    if T <= 0:
+        return 1.0
+    half = T / 2.0
+    if t_local <= half:
+        return 2.0 * (t_local / T) ** 2
+    return 1.0 - 2.0 * ((T - t_local) / T) ** 2
+
+
+def make_const_acc_segment(
+    start: tuple[int, int],
+    end: tuple[int, int],
+    start_time: float,
+    *,
+    accel: Optional[float] = None,
+    duration: Optional[float] = None,
+    channel: Optional[Channel] = None,
+) -> Segment:
+    """Bang-bang (symmetric +a / -a) segment, the common-case wrapper.
+
+    Provide *exactly one* of:
+      * `accel` — the acceleration to run at; duration falls out as
+        bang-bang(L, accel). Use this for "as fast as this accel allows".
+      * `duration` — the window the move must occupy; implied acceleration
+        is 4 * L / duration^2 (used when sharing a window across atoms,
+        e.g. AOD lattice ops; shorter moves run at less than a_max).
+
+    What acceleration the hardware allows is the calling Step's concern,
+    not the segment's — neither parameter here is intrinsically "max".
+    """
+    if (accel is None) == (duration is None):
+        raise ValueError("provide exactly one of `accel` or `duration`")
+
+    di = end[0] - start[0]
+    dj = end[1] - start[1]
+    L = math.hypot(di, dj)
+    T = bang_bang_duration(L, accel) if duration is None else duration
+
+    return make_segment(
+        start, end, start_time, T,
+        lambda t, _T=T: _bang_bang_profile(t, _T),
         channel=channel,
     )
 
