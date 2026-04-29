@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .atom_trajectory import AtomEnsemble
-from .trajectories import bang_bang_duration, make_segment
+from .segments import bang_bang_duration, make_segment
 
 
 class Step(ABC):
@@ -46,6 +46,7 @@ class Step(ABC):
 
 # --- AOD --------------------------------------------------------------------
 
+
 @dataclass
 class AODStep(Step):
     """Synchronous AOD lattice op.
@@ -58,6 +59,7 @@ class AODStep(Step):
     Monotonicity (no row/col crossings) is the caller's responsibility —
     the sqrt-time scheduler emits monotone shifts by construction.
     """
+
     start_time: float
     selected_rows: tuple[int, ...]
     selected_cols: tuple[int, ...]
@@ -94,8 +96,9 @@ class AODStep(Step):
         if T == 0:
             return  # nobody moves; nothing to record
         for atom, start, end in self._affected(ensemble):
-            seg = make_segment(start, end, self.start_time, self.a_max,
-                               duration=T, channel="aod")
+            seg = make_segment(
+                start, end, self.start_time, self.a_max, duration=T, channel="aod"
+            )
             atom.append(seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
@@ -103,6 +106,7 @@ class AODStep(Step):
 
 
 # --- RIPA -------------------------------------------------------------------
+
 
 @dataclass
 class RIPAStep(Step):
@@ -112,6 +116,7 @@ class RIPAStep(Step):
     or the col channel ('col', moves along y with i fixed). Diagonal moves
     are not allowed and must be split.
     """
+
     start_time: float
     atom_id: int
     target: tuple[int, int]
@@ -124,17 +129,26 @@ class RIPAStep(Step):
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         if self.channel == "row" and dj != 0:
-            raise ValueError(f"row-channel move must keep j fixed; got {current}->{self.target}")
+            raise ValueError(
+                f"row-channel move must keep j fixed; got {current}->{self.target}"
+            )
         if self.channel == "col" and di != 0:
-            raise ValueError(f"col-channel move must keep i fixed; got {current}->{self.target}")
+            raise ValueError(
+                f"col-channel move must keep i fixed; got {current}->{self.target}"
+            )
         return atom, current
 
     def apply(self, ensemble: AtomEnsemble) -> None:
         atom, current = self._move_for(ensemble)
         if current == tuple(self.target):
             return
-        seg = make_segment(current, tuple(self.target), self.start_time,
-                           self.a_max, channel=self.channel)
+        seg = make_segment(
+            current,
+            tuple(self.target),
+            self.start_time,
+            self.a_max,
+            channel=self.channel,
+        )
         atom.append(seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:

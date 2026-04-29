@@ -23,14 +23,14 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .atoms import AtomConfig, Grid
-from .trajectories import Trajectory
+from .segments import Segment
 
 
 @dataclass
 class AtomTrajectory:
     atom_id: int
-    initial_pos: tuple[int, int]                 # site at t = 0
-    segments: list[Trajectory] = field(default_factory=list)
+    initial_pos: tuple[int, int]  # site at t = 0
+    segments: list[Segment] = field(default_factory=list)
 
     # ---- queries ------------------------------------------------------------
 
@@ -72,7 +72,7 @@ class AtomTrajectory:
 
     # ---- mutation -----------------------------------------------------------
 
-    def append(self, segment: Trajectory) -> None:
+    def append(self, segment: Segment) -> None:
         """Append a segment, validating spatial + temporal continuity."""
         prev_pos = self.final_pos
         prev_time = self.final_time
@@ -96,6 +96,7 @@ class AtomEnsemble:
     Built from an `AtomConfig` (initial state). Steps mutate this object
     by appending segments to atoms' trajectories.
     """
+
     grid: Grid
     atoms: list[AtomTrajectory] = field(default_factory=list)
 

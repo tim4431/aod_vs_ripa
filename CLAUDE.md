@@ -11,16 +11,12 @@ conda activate vipa
 ```
 
 Do not use the base env, system Python, or create new envs without being asked.
+Dont automatically commit in git
 
 ## Project layout
 
-- `src/` — implementation (AOD schedulers, RIPA schedulers, benchmarking).
+- `src/` — implementation
+- `src/scheduler/` (AOD schedulers, RIPA schedulers).
 - `lib/` — shared utilities / primitives.
 - `doc/` — design notes and visualizations.
 - `README.md` — project scope and routing-problem definitions.
-
-## Project context
-
-See `README.md`. Two routing problems to keep distinct:
-- **Set → set** (identical atoms; defect-free array init).
-- **Pairwise** (distinguishable atoms; qubit rearrangement).
