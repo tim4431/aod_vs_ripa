@@ -51,12 +51,44 @@ class Sequence:
     def final_config(self) -> AtomConfig:
         return self.ensemble.final_config()
 
+    # ---- synchronous-snapshot view ------------------------------------------
+    #
+    # Synchronous schedulers (AOD lattice ops, or RIPA used as a baseline
+    # sync device) plan one batch at a time: query the current resting
+    # state, decide a batch of moves, emit step(s) sharing one start_time,
+    # and repeat. By construction `next_start_time()` is a moment when no
+    # atom is mid-flight, so `current_config()` and `occupancy_now()`
+    # return the resting snapshot the scheduler should reason about.
+    #
+    # For a sync RIPA batch, append several RIPASteps with the same
+    # start_time = next_start_time() before calling next_start_time()
+    # again — the batch ends at the max end_time, which is exactly what
+    # `total_duration()` will then report.
+
+    def current_config(self) -> AtomConfig:
+        """Resting state at `next_start_time()` (alias for final_config)."""
+        return self.final_config()
+
+    def occupancy_now(self) -> dict[tuple[int, int], int]:
+        """Map site -> atom_id at `next_start_time()`."""
+        return self.ensemble.occupancy_at_rest(self.next_start_time())
+
     # ---- mutation -----------------------------------------------------------
 
     def append(self, step: Step) -> None:
         """Apply the step to the running ensemble and remember it."""
         step.apply(self.ensemble)
         self.steps.append(step)
+
+    def append_sync_batch(self, steps: list[Step]) -> None:
+        """Append a batch of steps that share `next_start_time()`.
+
+        Convenience for synchronous RIPA scheduling: after this call,
+        `next_start_time()` reflects the latest end_time across the batch
+        (i.e. the synchronous "wait for everyone" semantics).
+        """
+        for step in steps:
+            self.append(step)
 
     # ---- validation ---------------------------------------------------------
 
