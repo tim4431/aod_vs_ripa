@@ -10,6 +10,7 @@ sequence builder.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from ..movement import AODStep
 
@@ -51,8 +52,13 @@ class LatticeMove:
             "direction": self.direction,
         }
 
-    def to_aod_step(self, *, start_time: float, a_max: float = 1.0) -> AODStep:
-        """Wrap this lattice shift in an `AODStep` for a `Sequence`."""
+    def to_aod_step(self, *, start_time: float,
+                    a_max: Optional[float] = None) -> AODStep:
+        """Wrap this lattice shift in an `AODStep` for a `Sequence`.
+
+        `a_max` is in grid_units/s^2; `None` defers to `PHYS_A_MAX_AOD`
+        in `movement.py`, converted at apply-time via the grid spacing.
+        """
         return AODStep(
             start_time=start_time,
             selected_rows=tuple(self.old_rows),

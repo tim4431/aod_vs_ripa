@@ -15,6 +15,13 @@ Both step types subclass `Step` and share one effect: they append
 
 Steps carry their own absolute `start_time`. Schedulers compute it from
 the ensemble's running `total_duration()` plus any inter-step gap.
+
+Acceleration units. The hardware spec is naturally written in m/s^2
+(physical), but `make_const_acc_segment` works in grid_units/s^2
+(coordinate). The two constants below are the physical ceilings; each
+Step converts them to grid units at apply-time using the ensemble's
+site spacing `grid.d`. Override per-step by passing `a_max=...` (in
+grid_units/s^2) — useful for tests or for slowing specific moves.
 """
 
 from __future__ import annotations
@@ -22,10 +29,39 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 
+from .atom_config import Grid
 from .atom_trajectory import AtomEnsemble
 from .segments import bang_bang_duration, make_const_acc_segment
+
+
+# --- physical-acceleration ceilings -----------------------------------------
+#
+# Tune these to match the actual hardware. AOD and RIPA are listed
+# separately because per-atom heating / loss budgets can differ even
+# when the trap optics are similar; in many systems they end up equal.
+
+PHYS_A_MAX_AOD: float = 2750.0    # m/s^2 — synchronous AOD lattice ops
+PHYS_A_MAX_RIPA: float = 2750.0   # m/s^2 — RIPA per-atom moves
+
+
+def grid_accel_from_phys(phys_a_m_s2: float, grid_d_um: float) -> float:
+    """Convert a physical acceleration (m/s^2) to grid_units/s^2.
+
+    A grid unit equals `grid_d_um * 1e-6` meters, so
+
+        a [grid/s^2] = phys_a [m/s^2] / (grid_d_um * 1e-6).
+    """
+    return phys_a_m_s2 / (grid_d_um * 1e-6)
+
+
+def _resolve_a_max(a_max: Optional[float], grid: Grid, phys_default: float) -> float:
+    """Resolve a Step's `a_max` to grid_units/s^2: explicit override
+    if given, else convert `phys_default` (m/s^2) via grid.d."""
+    if a_max is not None:
+        return a_max
+    return grid_accel_from_phys(phys_default, grid.d)
 
 
 class Step(ABC):
@@ -65,7 +101,8 @@ class AODStep(Step):
     selected_cols: tuple[int, ...]
     new_rows: tuple[int, ...]
     new_cols: tuple[int, ...]
-    a_max: float = 1.0
+    # grid_units/s^2 override; None -> convert PHYS_A_MAX_AOD via grid.d.
+    a_max: Optional[float] = None
 
     def __post_init__(self):
         if len(self.selected_rows) != len(self.new_rows):
@@ -86,10 +123,11 @@ class AODStep(Step):
 
     def _shared_duration(self, ensemble: AtomEnsemble) -> float:
         """Duration of the AOD op = bang-bang time of the longest atom move."""
+        a = _resolve_a_max(self.a_max, ensemble.grid, PHYS_A_MAX_AOD)
         max_L = 0.0
         for _, (i, j), (ni, nj) in self._affected(ensemble):
             max_L = max(max_L, math.hypot(ni - i, nj - j))
-        return bang_bang_duration(max_L, self.a_max)
+        return bang_bang_duration(max_L, a)
 
     def apply(self, ensemble: AtomEnsemble) -> None:
         T = self._shared_duration(ensemble)
@@ -122,7 +160,8 @@ class RIPAStep(Step):
     atom_id: int
     target: tuple[int, int]
     channel: Literal["row", "col"]
-    a_max: float = 1.0
+    # grid_units/s^2 override; None -> convert PHYS_A_MAX_RIPA via grid.d.
+    a_max: Optional[float] = None
 
     def _move_for(self, ensemble: AtomEnsemble):
         atom = ensemble.atom_by_id(self.atom_id)
@@ -145,9 +184,10 @@ class RIPAStep(Step):
             return
         # RIPA single-atom move: run at the step's a_max — schedulers
         # can drop a_max on individual steps to slow specific atoms.
+        a = _resolve_a_max(self.a_max, ensemble.grid, PHYS_A_MAX_RIPA)
         seg = make_const_acc_segment(current, tuple(self.target),
                                      self.start_time,
-                                     accel=self.a_max, channel=self.channel)
+                                     accel=a, channel=self.channel)
         atom.append(seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
@@ -155,4 +195,5 @@ class RIPAStep(Step):
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         L = math.hypot(di, dj)
-        return self.start_time + bang_bang_duration(L, self.a_max)
+        a = _resolve_a_max(self.a_max, ensemble.grid, PHYS_A_MAX_RIPA)
+        return self.start_time + bang_bang_duration(L, a)

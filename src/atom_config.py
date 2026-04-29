@@ -1,15 +1,17 @@
 """Grid + AtomConfig.
 
-`AtomConfig` is a *resting-state snapshot*: it records, for each atom,
-its integer (i, j) site **and** its `atom_id`. Atoms in motion are not
-described here — see `atom_trajectory.AtomTrajectory` for that.
+`AtomConfig` is a *resting-state snapshot*: per atom, the integer (i, j)
+site and the `atom_id`. Atoms in motion are not described here — see
+`atom_trajectory.AtomTrajectory` for that.
+
+`AtomConfig` deliberately does *not* carry the `Grid`. The grid is a
+property of the experimental setup, not of any particular snapshot, so
+it lives one level up — on `AtomEnsemble`, `Sequence`, and
+`RoutingRequest`. An `AtomConfig` is portable across compatible grids.
 
 The `atom_id` is an internal index for tracking and visualization; it
 does not by itself mark atoms as physically distinguishable. Whether
 atoms are distinguishable is a property of the routing problem.
-
-Static traps (e.g. SLM hand-off sites) are a hardware concern, not part
-of the atom configuration; pass them separately to the visualizer.
 """
 
 from __future__ import annotations
@@ -34,7 +36,6 @@ class Grid:
 
 @dataclass
 class AtomConfig:
-    grid: Grid
     # positions[k] = (i, j) of atom k, integer site. Shape (M, 2).
     positions: np.ndarray
     # atom_ids[k] = identifier of atom k. Shape (M,). Defaults to arange(M).
@@ -69,14 +70,8 @@ class AtomConfig:
     def n_atoms(self) -> int:
         return len(self.positions)
 
-    def xy(self) -> np.ndarray:
-        """Physical (x, y) coordinates of all atoms, shape (M, 2)."""
-        c = (self.grid.N - 1) / 2.0
-        return (self.positions.astype(float) - c) * self.grid.d
-
     def copy(self) -> "AtomConfig":
         return AtomConfig(
-            grid=self.grid,
             positions=self.positions.copy(),
             atom_ids=self.atom_ids.copy(),
         )

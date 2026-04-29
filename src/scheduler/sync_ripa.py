@@ -17,7 +17,9 @@ Mechanics:
 Usage pattern (concrete subclass):
 
     class MySyncRIPAScheduler(SyncScheduler, RIPAScheduler):
-        a_max: float = 1.0
+        # `a_max` is a grid_units/s^2 override. Leave None to use the
+        # physical ceiling PHYS_A_MAX_RIPA from src.movement.
+        a_max: Optional[float] = None
 
         def plan_next_batch(self, request, seq):
             occ = seq.occupancy_now()      # site -> atom_id snapshot

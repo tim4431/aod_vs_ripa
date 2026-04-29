@@ -112,12 +112,12 @@ class AtomEnsemble:
             raise ValueError("AtomEnsemble: atom_ids must be unique")
 
     @classmethod
-    def from_config(cls, cfg: AtomConfig) -> "AtomEnsemble":
+    def from_config(cls, grid: Grid, cfg: AtomConfig) -> "AtomEnsemble":
         atoms = [
             AtomTrajectory(atom_id=int(aid), initial_pos=(int(p[0]), int(p[1])))
             for p, aid in zip(cfg.positions, cfg.atom_ids)
         ]
-        return cls(grid=cfg.grid, atoms=atoms)
+        return cls(grid=grid, atoms=atoms)
 
     # ---- queries ------------------------------------------------------------
 
@@ -153,7 +153,9 @@ class AtomEnsemble:
         return occ
 
     def final_config(self) -> AtomConfig:
-        """Snapshot of final resting positions, preserving atom_ids."""
+        """Snapshot of final resting positions, preserving atom_ids.
+        The returned config does not carry the grid — fetch it from
+        this `AtomEnsemble` (or whoever owns the snapshot) if needed."""
         positions = np.array([a.final_pos for a in self.atoms], dtype=int)
         atom_ids = np.array([a.atom_id for a in self.atoms], dtype=int)
-        return AtomConfig(grid=self.grid, positions=positions, atom_ids=atom_ids)
+        return AtomConfig(positions=positions, atom_ids=atom_ids)

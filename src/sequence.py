@@ -18,7 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .atom_config import AtomConfig
+from .atom_config import AtomConfig, Grid
 from .atom_trajectory import AtomEnsemble
 from .movement import Step
 from .segments import Segment
@@ -27,13 +27,14 @@ from .validator import CollisionReport, validate_new_segments
 
 @dataclass
 class Sequence:
+    grid: Grid
     initial: AtomConfig
     inter_step_gap: float = 0.0
     steps: list[Step] = field(default_factory=list)
     _ensemble: Optional[AtomEnsemble] = None
 
     def __post_init__(self):
-        self._ensemble = AtomEnsemble.from_config(self.initial)
+        self._ensemble = AtomEnsemble.from_config(self.grid, self.initial)
 
     # ---- ensemble access ----------------------------------------------------
 
@@ -116,7 +117,7 @@ class Sequence:
         step and validating only the segments it adds. Returns the first
         report whose `ok` is False, or `ok=True` if the whole replay is
         clean. Useful for round-trip / sanity testing."""
-        fresh = AtomEnsemble.from_config(self.initial)
+        fresh = AtomEnsemble.from_config(self.grid, self.initial)
         for step in self.steps:
             before = {a.atom_id: len(a.segments) for a in fresh.atoms}
             step.apply(fresh)

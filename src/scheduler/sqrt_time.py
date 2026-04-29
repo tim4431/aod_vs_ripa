@@ -17,9 +17,9 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence as TypingSequence
+from typing import Iterable, Optional, Sequence as TypingSequence
 
-from ..atom_config import AtomConfig
+from ..atom_config import AtomConfig, Grid
 from ..atom_trajectory import AtomEnsemble
 from ..routing import RoutingRequest, Site
 from ..sequence import Sequence
@@ -48,7 +48,8 @@ class SqrtTimeAODScheduler(AODScheduler):
     variant, gathering atoms into the largest defect-free square.
     """
 
-    a_max: float = 1.0
+    # grid_units/s^2 override; None -> use PHYS_A_MAX_AOD via grid.d.
+    a_max: Optional[float] = None
     inter_step_gap: float = 0.0
     use_peephole: bool = True
     prefer_two_step: bool = True
@@ -62,15 +63,18 @@ class SqrtTimeAODScheduler(AODScheduler):
                 "pairings need an additional identity-preserving assignment."
             )
 
-        source_grid = _config_to_grid(request.initial)
-        target_grid = _target_grid(request.initial.grid.N, request.target_sites())
+        grid = request.grid
+        source_grid = _config_to_grid(request.initial, grid.N)
+        target_grid = _target_grid(grid.N, request.target_sites())
         if _count_atoms(source_grid) != _count_atoms(target_grid):
             raise ValueError("source and target must have the same atom count")
 
         if source_grid == target_grid:
             self.last_lattice_moves = []
             return Sequence(
-                initial=request.initial.copy(), inter_step_gap=self.inter_step_gap
+                grid=grid,
+                initial=request.initial.copy(),
+                inter_step_gap=self.inter_step_gap,
             )
 
         state = (
@@ -84,20 +88,25 @@ class SqrtTimeAODScheduler(AODScheduler):
         )
         self.last_lattice_moves = list(state.moves)
         return self._moves_to_sequence(
-            request.initial, state.moves, expected_grid=target_grid
+            grid, request.initial, state.moves, expected_grid=target_grid
         )
 
     def schedule_to_targets(
-        self, initial: AtomConfig, targets: Iterable[Site]
+        self, grid: Grid, initial: AtomConfig, targets: Iterable[Site]
     ) -> Sequence:
-        return self.schedule(RoutingRequest(initial=initial, targets=set(targets)))
+        src = [tuple(p) for p in initial.positions]
+        return self.schedule(
+            RoutingRequest(grid=grid, src=src, dst=list(targets), labeled=False)
+        )
 
-    def schedule_grid(self, initial: AtomConfig) -> Sequence:
+    def schedule_grid(self, grid: Grid, initial: AtomConfig) -> Sequence:
         """Gather atoms into the largest top-left square grid possible."""
-        source_grid = _config_to_grid(initial)
+        source_grid = _config_to_grid(initial, grid.N)
         state = _grid_reconfiguration(source_grid, self.use_peephole)
         self.last_lattice_moves = list(state.moves)
-        return self._moves_to_sequence(initial, state.moves, expected_grid=state.grid)
+        return self._moves_to_sequence(
+            grid, initial, state.moves, expected_grid=state.grid
+        )
 
     def lattice_moves(self, request: RoutingRequest) -> list[LatticeMove]:
         """Return only the row/column lattice operations for a request."""
@@ -106,18 +115,21 @@ class SqrtTimeAODScheduler(AODScheduler):
 
     def _moves_to_sequence(
         self,
+        grid: Grid,
         initial: AtomConfig,
         moves: TypingSequence[LatticeMove],
         *,
         expected_grid: GridMatrix | None = None,
     ) -> Sequence:
-        seq = Sequence(initial=initial.copy(), inter_step_gap=self.inter_step_gap)
+        seq = Sequence(
+            grid=grid, initial=initial.copy(), inter_step_gap=self.inter_step_gap
+        )
         for move in moves:
             for ni in move.new_rows:
-                if not _site_in_bounds(ni, 0, initial.grid.N):
+                if not _site_in_bounds(ni, 0, grid.N):
                     raise ValueError(f"lattice move leaves grid: row {ni}")
             for nj in move.new_cols:
-                if not _site_in_bounds(0, nj, initial.grid.N):
+                if not _site_in_bounds(0, nj, grid.N):
                     raise ValueError(f"lattice move leaves grid: col {nj}")
             # Skip lattice ops whose selected (row, col) intersection is
             # empty for our actual atom config — the algorithm emits some
@@ -131,7 +143,7 @@ class SqrtTimeAODScheduler(AODScheduler):
             )
 
         if expected_grid is not None:
-            final_grid = _config_to_grid(seq.final_config())
+            final_grid = _config_to_grid(seq.final_config(), grid.N)
             if final_grid != expected_grid:
                 raise RuntimeError(
                     "generated lattice moves did not produce the planned target grid"
@@ -554,10 +566,10 @@ def _verify_equalized_property(equalized_grid: GridMatrix) -> bool:
 # --- AtomConfig <-> binary grid bridge --------------------------------------
 
 
-def _config_to_grid(cfg: AtomConfig) -> GridMatrix:
-    grid = _zero_grid(cfg.grid.N, cfg.grid.N)
+def _config_to_grid(cfg: AtomConfig, N: int) -> GridMatrix:
+    grid = _zero_grid(N, N)
     for pos in cfg.positions:
-        i, j = _integer_site(pos, cfg.grid.N)
+        i, j = _integer_site(pos, N)
         if grid[i][j]:
             raise ValueError(f"duplicate atom at {(i, j)}")
         grid[i][j] = 1
