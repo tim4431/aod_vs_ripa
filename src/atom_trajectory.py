@@ -142,7 +142,7 @@ class AtomEnsemble:
             AtomTrajectory(atom_id=int(aid), initial_pos=(int(p[0]), int(p[1])))
             for p, aid in zip(cfg.positions, cfg.atom_ids)
         ]
-        return cls(grid=grid, atoms=atoms)
+        return cls(grid=grid, atomtrajs=atoms)
 
     # ---- queries ------------------------------------------------------------
 
@@ -237,9 +237,7 @@ class AtomEnsemble:
 
     # ---- mutation -----------------------------------------------------------
 
-    def append_segment(
-        self, atom_id: int, segment: Segment, *, check_collisions: bool = True
-    ) -> None:
+    def append_segment(self, atom_id: int, segment: Segment) -> None:
         """Validate then commit a segment to the addressed atom.
 
         Order:

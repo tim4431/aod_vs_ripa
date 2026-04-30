@@ -1,45 +1,42 @@
 # Architecture
 
-## Core dataclasses
+## Core Objects
 
-| Class                            | Holds                                                       | File |
-|----------------------------------|-------------------------------------------------------------|------|
-| `Grid(N, d, rc)`                 | grid size, site spacing, collision radius                   | [src/atoms.py](../src/atoms.py) |
-| `AtomConfig(grid, positions)`    | resting-state snapshot, **integer (i, j) only**             | [src/atoms.py](../src/atoms.py) |
-| `Trajectory(start_time, duration, start_pos, end_pos, fn, channel)` | one timed segment of motion; integer endpoints, float during flight | [src/trajectories.py](../src/trajectories.py) |
-| `AtomTrajectory(atom_id, initial_pos, segments)` | one atom's full life (`atom_id` is internal, *not* a distinguishability marker) | [src/atom_trajectory.py](../src/atom_trajectory.py) |
-| `AtomEnsemble(grid, atoms)`      | collection of `AtomTrajectory` — the live state             | [src/atom_trajectory.py](../src/atom_trajectory.py) |
-| `Step` (ABC)                     | `apply(ensemble)` appends segments                          | [src/movement.py](../src/movement.py) |
-| `AODStep`                        | sync lattice op: `selected_rows × selected_cols → new_*`    | [src/movement.py](../src/movement.py) |
-| `RIPAStep`                       | single-atom move along one EOM channel ('row' or 'col')     | [src/movement.py](../src/movement.py) |
-| `Sequence(initial, steps)`       | ordered list of Steps; builds the ensemble incrementally    | [src/sequence.py](../src/sequence.py) |
-| `RoutingRequest`                 | `targets` (Case 1) **xor** `pairing: Site→Site` (Case 2)    | [src/routing.py](../src/routing.py) |
+| Object | Role | File |
+|---|---|---|
+| `Grid(N, d, rc)` | grid size, physical spacing in um, collision radius | [`src/atom_config.py`](../src/atom_config.py) |
+| `AtomConfig(positions, atom_ids)` | resting snapshot; positions are integer `(i, j)` sites | [`src/atom_config.py`](../src/atom_config.py) |
+| `Segment` | one timed move with absolute `start_time`, `duration`, endpoints, profile, and channel | [`src/segments.py`](../src/segments.py) |
+| `AtomTrajectory` | one atom's full timeline; `atom_id` is only an internal handle | [`src/atom_trajectory.py`](../src/atom_trajectory.py) |
+| `AtomEnsemble` | live collection of atom trajectories plus collision-checked mutation | [`src/atom_trajectory.py`](../src/atom_trajectory.py) |
+| `Step`, `AODStep`, `RIPAStep` | scheduler commands that append segments to an ensemble | [`src/movement.py`](../src/movement.py) |
+| `Sequence` | ordered steps, initial config, ensemble state, timing helpers | [`src/sequence.py`](../src/sequence.py) |
+| `RoutingRequest` | routing input: `grid`, `src`, `dst`, `labeled` | [`src/routing.py`](../src/routing.py) |
+| `RIPASpec`, `nu_row`, `nu_col` | RIPA position-to-frequency mapping | [`src/ripa_freq.py`](../src/ripa_freq.py) |
 
-Snapshot ↔ live state: `AtomConfig` is a resting snapshot at one instant; `AtomEnsemble` is the timeline. Convert via `AtomEnsemble.from_config(cfg)` and `ensemble.final_config()`.
+Grid coordinates use `(i, j)` in code. Physical plotting coordinates are produced by `Grid.ij_to_xy(...)`, centered so the array center is `(0 um, 0 um)`.
 
-## Async vs sync
+## Data Flow
 
-RIPA is natively asynchronous (independent EOM tones); AOD is synchronous (one lattice op = one batch). Both backends share one timing model:
+`RoutingRequest.initial` builds an `AtomConfig`. A `Sequence` wraps that config in an `AtomEnsemble`. Appending a `Step` creates one or more `Segment`s, and `AtomEnsemble.append_segment(...)` checks per-atom continuity and cross-atom collision before committing.
 
-- `Trajectory.start_time` is **absolute global time**.
-- `seq.next_start_time()` returns `max(end_time)` across the ensemble — the earliest moment when no atom is mid-flight.
+Use `Sequence.final_config()` for the final resting snapshot, and `AtomEnsemble.positions_at(t)` / `xy_at(t)` for timeline samples.
 
-That single rule produces both behaviors:
+## Timing
 
-- **AOD (sync, native).** One `AODStep` per lattice op, started at `seq.next_start_time()`. All affected atoms share one start_time and one duration (longest move sets the duration).
-- **RIPA (async, native).** A scheduler emits `RIPAStep`s with arbitrary start_times, possibly overlapping, on different atoms.
-- **RIPA (sync baseline).** Emit several `RIPAStep`s with the **same** `start_time = seq.next_start_time()`. The next `next_start_time()` jumps to the slowest atom's end → automatic "wait for the batch" semantics. No new step type required.
+All segment times are absolute. `Sequence.next_start_time()` returns the current total duration plus `inter_step_gap`, or `0` before any motion.
 
-## Sync interface (shared by AOD + sync-RIPA schedulers)
-
-`Sequence` exposes the resting snapshot at the next batch boundary:
-
-- `current_config() -> AtomConfig`
-- `occupancy_now() -> dict[Site, int]`   (site → atom_id)
-- `append_sync_batch(steps)`             (atomic: all share one start_time)
-
-`SyncScheduler` ([src/scheduler/base.py](../src/scheduler/base.py)) drives the loop: subclasses implement `plan_next_batch(request, seq) -> list[Step]` and return `[]` when done. AOD and sync-RIPA differ only in which `Step` type they emit.
+`AODStep` is synchronous: atoms in `selected_rows x selected_cols` move together and share the longest required duration. `RIPAStep` moves one atom along one channel, `"row"` or `"col"`; asynchronous behavior comes from giving different `RIPAStep`s different `start_time`s. For sync-style batches, use `Sequence.append_sync_batch(...)`.
 
 ## Validation
 
-`validate_ensemble(ensemble, dt)` ([src/validator.py](../src/validator.py)) walks the timeline, sampling every atom's position via `AtomTrajectory.position_at(t)` only inside `moving_intervals()` plus segment boundaries, then runs an O(M²) pairwise check against `grid.rc`.
+Collision validation is built into `AtomEnsemble.append_segment(...)`. It samples candidate motion against every other atom using `ensemble.collision_dt` and compares physical distances to `grid.rc`. `Sequence.validate(dt)` replays the stored steps at a different sampling interval.
+
+## Visualization
+
+[`src/visualization.py`](../src/visualization.py) renders existing `Sequence` or `AtomEnsemble` timelines.
+
+- `plot_atom_plane(ax, timeline, t, ...)`: atom plane, static traps, addressed atoms, trails, planned paths.
+- `plot_frequency_tones(axes, timeline, t, ...)`: current row/col tones and tone trajectories.
+- `plot_frame(...)` / `save_frame(...)`: combined atom-plane plus frequency panels.
+- `render_gif(...)` / `render_animation(...)`: frame rendering plus GIF export, with optional multiprocessing.
