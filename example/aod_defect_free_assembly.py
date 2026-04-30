@@ -24,8 +24,8 @@ if str(ROOT) not in sys.path:
 
 from src.atom_config import Grid
 from src.routing import RoutingRequest, Site
-from src.scheduler.sqrt_time import SqrtTimeAODScheduler
-from src.visualization import render_animation, save_frame
+from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
+from src.visualization import render_check_outputs
 
 
 N = 10
@@ -124,35 +124,19 @@ def main() -> None:
     )
 
     static_traps = dst[: square_side * square_side]
-    save_frame(
+    render_check_outputs(
         sequence,
-        0.0,
-        OUT_DIR / f"{PREFIX}_t0.png",
+        OUT_DIR,
+        PREFIX,
         static_traps=static_traps,
         show_planned=True,
         addressed_style="edge",
-        title=f"AOD defect-free assembly - t=0 - target {square_side}x{square_side}",
-    )
-    save_frame(
-        sequence,
-        sequence.total_duration(),
-        OUT_DIR / f"{PREFIX}_tfinal.png",
-        static_traps=static_traps,
-        show_planned=True,
-        addressed_style="edge",
-        title=f"AOD defect-free assembly - final - target {square_side}x{square_side}",
-    )
-    render_animation(
-        sequence,
-        OUT_DIR / f"{PREFIX}.gif",
-        fps=16,
-        n_frames=80,
-        hold_seconds=0.8,
+        title_prefix=f"AOD defect-free assembly - target {square_side}x{square_side}",
+        gif_fps=6,
+        gif_frames=100,
+        gif_hold_seconds=1.5,
         optimize="speed",
         use_multiprocessing=False,
-        static_traps=static_traps,
-        addressed_style="edge",
-        show_planned=True,
     )
 
 

@@ -116,6 +116,9 @@ class SqrtTimeAODScheduler(SyncScheduler):
             self.append_step(move.to_step(self.sequence.next_start_time()))
 
 
+AODSqrtTimeScheduler = SqrtTimeAODScheduler
+
+
 def occupancy_grid_from_sites(N: int, sites: Iterable[Site]) -> GridMatrix:
     grid = [[0 for _ in range(N)] for _ in range(N)]
     for i, j in sites:

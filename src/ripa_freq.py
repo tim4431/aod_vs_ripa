@@ -32,7 +32,11 @@ class RIPASpec:
 
 
 def _wrap(nu: float, FSR: float) -> float:
-    """Wrap nu into [-FSR/2, +FSR/2)."""
+    """Wrap nu into [-FSR/2, +FSR/2).
+
+    Values near opposite ends of this interval are adjacent modulo FSR;
+    visualizers should not draw a physical sweep across the wrap jump.
+    """
     return ((nu + FSR / 2) % FSR) - FSR / 2
 
 

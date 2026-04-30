@@ -8,6 +8,7 @@ or call `plot_frame` / `render_gif` for the full four-panel view.
 from __future__ import annotations
 
 import multiprocessing as mp
+import math
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ def plot_atom_plane(
         ensemble,
         float(t),
         base["spec"],
+        timeline=timeline,
         show_motion_blur=show_motion_blur,
         show_planned=show_planned,
         trail_samples=trail_samples,
@@ -134,6 +136,7 @@ def plot_frequency_tones(
         ensemble,
         float(t),
         base["spec"],
+        timeline=timeline,
         show_motion_blur=False,
         show_planned=False,
         trail_samples=0,
@@ -211,6 +214,7 @@ def plot_frame(
         ensemble,
         float(t),
         base["spec"],
+        timeline=timeline,
         show_motion_blur=show_motion_blur,
         show_planned=show_planned,
         trail_samples=trail_samples,
@@ -331,13 +335,14 @@ def render_animation(
         tone_samples_per_segment=tone_samples,
     )
     frame_payloads = [
-        _build_frame_payload(
-            ensemble,
-            float(t),
-            base["spec"],
-            show_motion_blur=show_motion_blur,
-            show_planned=show_planned,
-            trail_samples=trail_samples,
+            _build_frame_payload(
+                ensemble,
+                float(t),
+                base["spec"],
+                timeline=timeline,
+                show_motion_blur=show_motion_blur,
+                show_planned=show_planned,
+                trail_samples=trail_samples,
             trail_duration=None,
             planned_samples_per_segment=planned_samples,
         )
@@ -379,6 +384,77 @@ def render_animation(
         _save_gif_from_pngs(frame_paths, out, fps=fps)
 
     return out
+
+
+def render_check_outputs(
+    timeline: Any,
+    output_dir: str | Path,
+    prefix: str,
+    *,
+    render_gif: bool = True,
+    gif_fps: int = 8,
+    gif_frames: int = 80,
+    gif_hold_seconds: float = 1.0,
+    title_prefix: str | None = None,
+    **visual_kwargs: Any,
+) -> dict[str, Path]:
+    """Render the standard t=0, t=final, and optional GIF check outputs."""
+
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ensemble = _as_ensemble(timeline)
+    final_t = ensemble.total_duration()
+    label = title_prefix or prefix
+
+    paths = {
+        "t0": out_dir / f"{prefix}_t0.png",
+        "tfinal": out_dir / f"{prefix}_tfinal.png",
+    }
+    animation_only = {
+        "frames_dir",
+        "keep_frames",
+        "optimize",
+        "use_multiprocessing",
+        "workers",
+    }
+    frame_kwargs = {
+        key: value for key, value in visual_kwargs.items() if key not in animation_only
+    }
+
+    save_frame(
+        timeline,
+        0.0,
+        paths["t0"],
+        **{
+            **frame_kwargs,
+            "title": frame_kwargs.get("title", f"{label} - t=0"),
+        },
+    )
+    save_frame(
+        timeline,
+        final_t,
+        paths["tfinal"],
+        **{
+            **frame_kwargs,
+            "title": frame_kwargs.get("title", f"{label} - final"),
+        },
+    )
+
+    if render_gif:
+        paths["gif"] = out_dir / f"{prefix}.gif"
+        animation_kwargs = {
+            key: value for key, value in visual_kwargs.items() if key != "title"
+        }
+        render_animation(
+            timeline,
+            paths["gif"],
+            fps=gif_fps,
+            n_frames=gif_frames,
+            hold_seconds=gif_hold_seconds,
+            **animation_kwargs,
+        )
+
+    return paths
 
 
 def _as_ensemble(timeline: Any) -> AtomEnsemble:
@@ -456,6 +532,7 @@ def _build_frame_payload(
     t: float,
     spec: RIPASpec,
     *,
+    timeline: Any | None = None,
     show_motion_blur: bool,
     show_planned: bool,
     trail_samples: int,
@@ -469,6 +546,7 @@ def _build_frame_payload(
     col_active: list[dict[str, Any]] = []
     trails: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
+    aod_traps_xy = _active_aod_traps_xy(timeline, ensemble, t)
 
     for idx, atom in enumerate(ensemble.atomtrajs):
         seg = _active_segment(atom, t)
@@ -493,11 +571,13 @@ def _build_frame_payload(
                     }
                 )
             if show_motion_blur and trail_samples > 1:
-                t0 = seg.start_time
-                if trail_duration is not None:
-                    t0 = max(t0, t - trail_duration)
-                t1 = min(t, seg.end_time)
-                xy = _sample_segment_xy(ensemble.grid, seg, t0, t1, trail_samples)
+                xy = _motion_blur_xy(
+                    ensemble.grid,
+                    seg,
+                    float(t),
+                    trail_samples,
+                    trail_duration,
+                )
                 if len(xy) > 1:
                     trails.append({"idx": idx, "xy": xy})
 
@@ -529,6 +609,7 @@ def _build_frame_payload(
         "col_active": col_active,
         "trails": trails,
         "planned": planned,
+        "aod_traps_xy": aod_traps_xy,
     }
 
 
@@ -600,6 +681,20 @@ def _plot_atom_plane_payload(
             linewidths=0.8,
             alpha=0.55,
             zorder=2,
+        )
+
+    aod_traps_xy = frame.get("aod_traps_xy")
+    if aod_traps_xy is not None and len(aod_traps_xy):
+        ax.scatter(
+            aod_traps_xy[:, 0],
+            aod_traps_xy[:, 1],
+            s=trap_size * 5.0,
+            marker="s",
+            facecolors="none",
+            edgecolors="#d62728",
+            linewidths=1.1,
+            alpha=0.70,
+            zorder=3.6,
         )
 
     for path in frame["planned"]:
@@ -745,13 +840,23 @@ def _plot_tone_history_payload(
         nus = np.asarray(traj["freqs"], dtype=float)
         idx = int(traj["idx"])
         if show_future:
-            ax.plot(ts * time_factor, nus, color=colors[idx], linewidth=1.4, alpha=0.35)
+            _plot_wrapped_frequency_line(
+                ax,
+                ts * time_factor,
+                nus,
+                spec.FSR1,
+                color=colors[idx],
+                linewidth=1.4,
+                alpha=0.35,
+            )
         else:
             mask = ts <= t_now + 1e-15
             if np.count_nonzero(mask) >= 2:
-                ax.plot(
+                _plot_wrapped_frequency_line(
+                    ax,
                     ts[mask] * time_factor,
                     nus[mask],
+                    spec.FSR1,
                     color=colors[idx],
                     linewidth=1.4,
                     alpha=0.45,
@@ -765,6 +870,25 @@ def _plot_tone_history_payload(
     ax.set_xlabel(f"t ({base['time_unit']})")
     ax.set_ylabel(base["frequency_label"])
     ax.grid(True, color="#e5e5e5", linewidth=0.6)
+
+
+def _plot_wrapped_frequency_line(
+    ax: Any,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    fsr: float,
+    **plot_kwargs: Any,
+) -> None:
+    """Plot modulo-wrapped frequencies without drawing wrap jumps."""
+    if len(xs) < 2:
+        return
+    jump = abs(float(fsr)) / 2.0
+    breaks = np.flatnonzero(np.abs(np.diff(ys)) > jump) + 1
+    starts = np.r_[0, breaks]
+    ends = np.r_[breaks, len(xs)]
+    for start, end in zip(starts, ends):
+        if end - start >= 2:
+            ax.plot(xs[start:end], ys[start:end], **plot_kwargs)
 
 
 def _draw_gaussian_blob(ax: Any, x: float, y: float, sigma: float) -> None:
@@ -870,6 +994,68 @@ def _future_segments(
             yield seg
 
 
+def _active_aod_traps_xy(
+    timeline: Any | None,
+    ensemble: AtomEnsemble,
+    t: float,
+    *,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """Positions of every active AOD trap, including empty intersections."""
+    steps = getattr(timeline, "steps", None)
+    if not steps:
+        return np.empty((0, 2), dtype=float)
+
+    traps: list[tuple[float, float]] = []
+    for step in steps:
+        selected_rows = getattr(step, "selected_rows", None)
+        selected_cols = getattr(step, "selected_cols", None)
+        new_rows = getattr(step, "new_rows", None)
+        new_cols = getattr(step, "new_cols", None)
+        start_time = getattr(step, "start_time", None)
+        if (
+            selected_rows is None
+            or selected_cols is None
+            or new_rows is None
+            or new_cols is None
+            or start_time is None
+        ):
+            continue
+
+        try:
+            end_time = step.end_time(ensemble)
+        except Exception:
+            continue
+        duration = float(end_time - start_time)
+        if duration <= 0 or not (start_time - tol <= t < end_time - tol):
+            continue
+
+        u = _bang_bang_fraction(float(t - start_time), duration)
+        rows = [
+            float(old) + u * (float(new) - float(old))
+            for old, new in zip(selected_rows, new_rows)
+        ]
+        cols = [
+            float(old) + u * (float(new) - float(old))
+            for old, new in zip(selected_cols, new_cols)
+        ]
+        traps.extend((i, j) for i in rows for j in cols)
+
+    if not traps:
+        return np.empty((0, 2), dtype=float)
+    return ensemble.grid.ij_to_xy(np.asarray(traps, dtype=float))
+
+
+def _bang_bang_fraction(t_local: float, duration: float) -> float:
+    if duration <= 0:
+        return 1.0
+    t = min(max(float(t_local), 0.0), float(duration))
+    half = duration / 2.0
+    if t <= half:
+        return 2.0 * (t / duration) ** 2
+    return 1.0 - 2.0 * ((duration - t) / duration) ** 2
+
+
 def _sample_segment_xy(
     grid: Grid,
     seg: Segment,
@@ -882,6 +1068,93 @@ def _sample_segment_xy(
     ts = np.linspace(t0, t1, max(2, int(samples)))
     ij = np.asarray([seg.position_at(float(t)) for t in ts], dtype=float)
     return grid.ij_to_xy(ij)
+
+
+def _motion_blur_xy(
+    grid: Grid,
+    seg: Segment,
+    t: float,
+    samples: int,
+    trail_duration: float | None,
+) -> np.ndarray:
+    """Speed-scaled tail ending at the atom's current position."""
+    t_now = min(max(float(t), seg.start_time), seg.end_time)
+    if t_now <= seg.start_time or seg.duration <= 0:
+        return np.empty((0, 2), dtype=float)
+
+    if trail_duration is not None:
+        t0 = max(seg.start_time, t_now - float(trail_duration))
+        return _sample_segment_xy(grid, seg, t0, t_now, samples)
+
+    total_distance = math.hypot(
+        seg.end_pos[0] - seg.start_pos[0],
+        seg.end_pos[1] - seg.start_pos[1],
+    )
+    if total_distance <= 0:
+        return np.empty((0, 2), dtype=float)
+
+    speed = _segment_speed_grid(seg, t_now)
+    if speed <= 1e-12:
+        return np.empty((0, 2), dtype=float)
+
+    shutter = 0.18 * seg.duration
+    current_fraction = _segment_path_fraction(seg, t_now)
+    current_distance = current_fraction * total_distance
+    blur_distance = min(speed * shutter, current_distance, 0.45 * total_distance)
+    if blur_distance <= 1e-12:
+        return np.empty((0, 2), dtype=float)
+
+    start_fraction = max(0.0, (current_distance - blur_distance) / total_distance)
+    t0 = _time_for_path_fraction(seg, start_fraction, seg.start_time, t_now)
+    return _sample_segment_xy(grid, seg, t0, t_now, samples)
+
+
+def _segment_speed_grid(seg: Segment, t: float) -> float:
+    eps = min(max(seg.duration * 1e-3, 1e-12), 1e-6)
+    t0 = max(seg.start_time, t - eps)
+    t1 = min(seg.end_time, t + eps)
+    if t1 <= t0:
+        return 0.0
+    p0 = seg.position_at(t0)
+    p1 = seg.position_at(t1)
+    return math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / (t1 - t0)
+
+
+def _segment_path_fraction(seg: Segment, t: float) -> float:
+    if seg.profile is not None:
+        return min(max(float(seg.profile(t - seg.start_time)), 0.0), 1.0)
+
+    di = seg.end_pos[0] - seg.start_pos[0]
+    dj = seg.end_pos[1] - seg.start_pos[1]
+    length2 = di * di + dj * dj
+    if length2 <= 0:
+        return 1.0
+    pos = seg.position_at(t)
+    u = ((pos[0] - seg.start_pos[0]) * di + (pos[1] - seg.start_pos[1]) * dj) / length2
+    return min(max(float(u), 0.0), 1.0)
+
+
+def _time_for_path_fraction(
+    seg: Segment,
+    fraction: float,
+    lo: float,
+    hi: float,
+) -> float:
+    fraction = min(max(float(fraction), 0.0), 1.0)
+    if fraction <= 0.0:
+        return seg.start_time
+    if fraction >= _segment_path_fraction(seg, hi):
+        return hi
+
+    left = max(seg.start_time, lo)
+    right = min(seg.end_time, hi)
+    for _ in range(48):
+        mid = (left + right) / 2.0
+        if _segment_path_fraction(seg, mid) < fraction:
+            left = mid
+        else:
+            right = mid
+    return (left + right) / 2.0
 
 
 def _channels_for_segment(seg: Segment) -> tuple[Literal["row", "col"], ...]:
