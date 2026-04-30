@@ -55,12 +55,13 @@ def maybe_render(prefix: str, sequence: Sequence, request: RoutingRequest, rende
         OUT_DIR,
         prefix,
         static_traps=request.dst,
+        view="demo",
         show_planned=True,
         addressed_style="edge",
         title_prefix=prefix,
         gif_fps=8,
         gif_hold_seconds=0.8,
-        optimize="speed",
+        quality="speed",
         use_multiprocessing=False,
     )
 

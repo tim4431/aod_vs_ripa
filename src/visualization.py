@@ -1,8 +1,9 @@
-"""Visualization helpers for atom rearrangement timelines.
+"""Visualization helpers for atom rearrangement motion.
 
-The public functions are intentionally axis-oriented: pass an existing
-matplotlib axis to render just the atom plane or the frequency/tone panels,
-or call `plot_frame` / `render_gif` for the full four-panel view.
+Most public functions accept either a `Sequence` (which also exposes hardware
+steps) or an `AtomEnsemble` (just the atom trajectories). The lighter demo and
+benchmark views render only atom motion; the detail view adds the EOM/AOD tone
+panels used for hardware debugging.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ ToneChannel = Literal["row", "col"]
 ToneHardware = Literal["AOD", "EOM", "AOD/EOM", "tone"]
 PlannedTrajectoryMode = Literal["none", "full", "next"]
 AddressedStyle = Literal["edge", "blob", "both", "none"]
+RenderView = Literal["demo", "benchmark", "detail"]
+RenderQuality = Literal["speed", "quality"]
 OptimizeMode = Literal["speed", "performance", "quality"]
 
 DEFAULT_FSR1_GHZ = 3.0
@@ -50,6 +53,225 @@ class VisualizationAxes:
     col_tones: Any
     row_trajectories: Any
     col_trajectories: Any
+
+
+@dataclass(frozen=True)
+class RenderStyle:
+    """Resolved visual tradeoffs for frame rendering."""
+
+    dpi: int
+    addressed_style: AddressedStyle
+    show_motion_blur: bool
+    trail_samples: int
+    tone_samples_per_segment: int
+    planned_samples_per_segment: int
+    atom_size: float
+    trap_size: float
+
+
+def plot_atom_motion(
+    ax: Any,
+    motion: Any,
+    t: float,
+    *,
+    quality: RenderQuality = "speed",
+    atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
+    static_traps: bool | Iterable[Site] = True,
+    addressed_style: AddressedStyle | None = None,
+    show_motion_blur: bool | None = None,
+    show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
+    show_atom_ids: bool = True,
+    trail_samples: int | None = None,
+    trail_duration: float | None = None,
+    planned_samples_per_segment: int | None = None,
+    atom_size: float | None = None,
+    trap_size: float | None = None,
+    title: str | None = None,
+) -> Any:
+    """Draw only the atom plane for a `Sequence` or `AtomEnsemble`.
+
+    This is the reusable renderer behind the demo and benchmark views. In
+    `quality="speed"` it uses an edge highlight for addressed atoms and skips
+    motion blur; `quality="quality"` uses a higher-detail addressed highlight
+    and motion trail.
+    """
+
+    style = _resolve_render_style(
+        quality,
+        dpi=None,
+        addressed_style=addressed_style,
+        show_motion_blur=show_motion_blur,
+        trail_samples=trail_samples,
+        tone_samples_per_segment=None,
+        planned_samples_per_segment=planned_samples_per_segment,
+        atom_size=atom_size,
+        trap_size=trap_size,
+    )
+    ensemble = _as_ensemble(motion)
+    planned_mode = _resolve_planned_trajectory_mode(
+        show_planned, planned_trajectory
+    )
+    base = _build_base_payload(
+        ensemble,
+        spec=None,
+        atom_colors=atom_colors,
+        static_traps=static_traps,
+        time_unit="us",
+        frequency_label="nu / FSR1 (mod 1)",
+        tone_samples_per_segment=style.tone_samples_per_segment,
+        include_tones=False,
+    )
+    frame = _build_frame_payload(
+        ensemble,
+        float(t),
+        spec=None,
+        motion=motion,
+        include_tones=False,
+        show_motion_blur=style.show_motion_blur,
+        planned_trajectory=planned_mode,
+        trail_samples=style.trail_samples,
+        trail_duration=trail_duration,
+        planned_samples_per_segment=style.planned_samples_per_segment,
+    )
+    _plot_atom_plane_payload(
+        ax,
+        base,
+        frame,
+        addressed_style=style.addressed_style,
+        show_atom_ids=show_atom_ids,
+        atom_size=style.atom_size,
+        trap_size=style.trap_size,
+        title=title,
+    )
+    return ax
+
+
+def plot_demo_frame(
+    motion: Any,
+    t: float,
+    *,
+    fig: Any | None = None,
+    ax: Any | None = None,
+    quality: RenderQuality = "speed",
+    atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
+    static_traps: bool | Iterable[Site] = True,
+    addressed_style: AddressedStyle | None = None,
+    show_motion_blur: bool | None = None,
+    show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
+    show_atom_ids: bool = True,
+    trail_samples: int | None = None,
+    trail_duration: float | None = None,
+    planned_samples_per_segment: int | None = None,
+    atom_size: float | None = None,
+    trap_size: float | None = None,
+    figsize: tuple[float, float] = (5.4, 5.2),
+    title: str | None = None,
+) -> tuple[Any, Any]:
+    """Draw the demo view: one atom-motion plot."""
+
+    plt = _load_pyplot()
+    if ax is None:
+        fig = plt.figure(figsize=figsize, constrained_layout=True) if fig is None else fig
+        ax = fig.add_subplot(1, 1, 1)
+    else:
+        fig = ax.figure if fig is None else fig
+
+    plot_atom_motion(
+        ax,
+        motion,
+        t,
+        quality=quality,
+        atom_colors=atom_colors,
+        static_traps=static_traps,
+        addressed_style=addressed_style,
+        show_motion_blur=show_motion_blur,
+        show_planned=show_planned,
+        planned_trajectory=planned_trajectory,
+        show_atom_ids=show_atom_ids,
+        trail_samples=trail_samples,
+        trail_duration=trail_duration,
+        planned_samples_per_segment=planned_samples_per_segment,
+        atom_size=atom_size,
+        trap_size=trap_size,
+        title=title,
+    )
+    return fig, ax
+
+
+def plot_benchmark_frame(
+    motions: Mapping[str, Any] | Iterable[Any],
+    t: float,
+    *,
+    labels: Iterable[str] | None = None,
+    fig: Any | None = None,
+    axes: Iterable[Any] | Any | None = None,
+    quality: RenderQuality = "speed",
+    atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
+    static_traps: bool | Iterable[Site] | Mapping[str, Iterable[Site]] = True,
+    addressed_style: AddressedStyle | None = None,
+    show_motion_blur: bool | None = None,
+    show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
+    show_atom_ids: bool = True,
+    trail_samples: int | None = None,
+    trail_duration: float | None = None,
+    planned_samples_per_segment: int | None = None,
+    atom_size: float | None = None,
+    trap_size: float | None = None,
+    figsize: tuple[float, float] | None = None,
+    title: str | None = None,
+) -> tuple[Any, list[Any]]:
+    """Draw the benchmark view: one row of atom-motion plots."""
+
+    items = _normalize_motion_items(motions, labels)
+    if not items:
+        raise ValueError("benchmark view needs at least one motion object")
+
+    plt = _load_pyplot()
+    n = len(items)
+    if axes is None:
+        size = figsize or (max(4.0, 4.0 * n), 4.6)
+        fig, axes_obj = plt.subplots(
+            1,
+            n,
+            figsize=size,
+            squeeze=False,
+            constrained_layout=True,
+        )
+        axes_list = list(axes_obj.ravel())
+    else:
+        axes_list = list(np.asarray(axes, dtype=object).ravel())
+        if len(axes_list) != n:
+            raise ValueError(f"expected {n} benchmark axes, got {len(axes_list)}")
+        fig = axes_list[0].figure if fig is None else fig
+
+    for index, ((label, motion), ax) in enumerate(zip(items, axes_list)):
+        panel_title = f"{label}  -  t = {_format_time(float(t), 'us')}"
+        plot_atom_motion(
+            ax,
+            motion,
+            t,
+            quality=quality,
+            atom_colors=atom_colors,
+            static_traps=_panel_value(static_traps, index, label),
+            addressed_style=addressed_style,
+            show_motion_blur=show_motion_blur,
+            show_planned=show_planned,
+            planned_trajectory=planned_trajectory,
+            show_atom_ids=show_atom_ids,
+            trail_samples=trail_samples,
+            trail_duration=trail_duration,
+            planned_samples_per_segment=planned_samples_per_segment,
+            atom_size=atom_size,
+            trap_size=trap_size,
+            title=panel_title,
+        )
+
+    if title:
+        fig.suptitle(title)
+    return fig, axes_list
 
 
 def plot_atom_plane(
@@ -90,12 +312,14 @@ def plot_atom_plane(
         time_unit="us",
         frequency_label="nu / FSR1 (mod 1)",
         tone_samples_per_segment=48,
+        include_tones=False,
     )
     frame = _build_frame_payload(
         ensemble,
         float(t),
-        base["spec"],
-        timeline=timeline,
+        spec=None,
+        motion=timeline,
+        include_tones=False,
         show_motion_blur=show_motion_blur,
         planned_trajectory=planned_mode,
         trail_samples=trail_samples,
@@ -110,6 +334,7 @@ def plot_atom_plane(
         show_atom_ids=show_atom_ids,
         atom_size=atom_size,
         trap_size=trap_size,
+        title=None,
     )
     return ax
 
@@ -141,12 +366,14 @@ def plot_frequency_tones(
         time_unit=time_unit,
         frequency_label=frequency_label,
         tone_samples_per_segment=tone_samples_per_segment,
+        include_tones=True,
     )
     frame = _build_frame_payload(
         ensemble,
         float(t),
-        base["spec"],
-        timeline=timeline,
+        spec=base["spec"],
+        motion=timeline,
+        include_tones=True,
         show_motion_blur=False,
         planned_trajectory="none",
         trail_samples=0,
@@ -166,35 +393,98 @@ def plot_frame(
     timeline: Any,
     t: float,
     *,
+    view: RenderView = "detail",
+    quality: RenderQuality = "speed",
+    labels: Iterable[str] | None = None,
     fig: Any | None = None,
-    axes: VisualizationAxes | tuple[Any, Any, Any, Any, Any] | None = None,
+    axes: VisualizationAxes | tuple[Any, Any, Any, Any, Any] | Iterable[Any] | None = None,
     spec: RIPASpec | None = None,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     static_traps: bool | Iterable[Site] = True,
-    addressed_style: AddressedStyle = "edge",
-    show_motion_blur: bool = True,
+    addressed_style: AddressedStyle | None = None,
+    show_motion_blur: bool | None = None,
     show_planned: bool = True,
     planned_trajectory: PlannedTrajectoryMode | None = None,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
     frequency_label: str = "nu / FSR1 (mod 1)",
     tone_samples_per_segment: int = 64,
-    trail_samples: int = 8,
+    trail_samples: int | None = None,
     trail_duration: float | None = None,
-    planned_samples_per_segment: int = 32,
-    atom_size: float = 70.0,
-    trap_size: float = 12.0,
+    planned_samples_per_segment: int | None = None,
+    atom_size: float | None = None,
+    trap_size: float | None = None,
     figsize: tuple[float, float] = (12.0, 6.2),
     title: str | None = None,
-) -> tuple[Any, VisualizationAxes]:
-    """Draw the full animation frame: atom plane left, tone panels right.
+) -> tuple[Any, Any]:
+    """Draw a demo, benchmark, or detail animation frame.
 
-    `planned_trajectory` may be "none", "full", or "next"; when omitted,
-    the old `show_planned` boolean selects "full" or "none".
+    `view="demo"` draws one atom-motion panel, `view="benchmark"` draws a
+    row of atom-motion panels for multiple schedulers, and `view="detail"`
+    draws the atom plane plus EOM/AOD tone panels.
     """
+
+    if view == "demo":
+        return plot_demo_frame(
+            timeline,
+            t,
+            fig=fig,
+            ax=axes,  # type: ignore[arg-type]
+            quality=quality,
+            atom_colors=atom_colors,
+            static_traps=static_traps,
+            addressed_style=addressed_style,
+            show_motion_blur=show_motion_blur,
+            show_planned=show_planned,
+            planned_trajectory=planned_trajectory,
+            show_atom_ids=show_atom_ids,
+            trail_samples=trail_samples,
+            trail_duration=trail_duration,
+            planned_samples_per_segment=planned_samples_per_segment,
+            atom_size=atom_size,
+            trap_size=trap_size,
+            figsize=figsize,
+            title=title,
+        )
+    if view == "benchmark":
+        return plot_benchmark_frame(
+            timeline,
+            t,
+            labels=labels,
+            fig=fig,
+            axes=axes,
+            quality=quality,
+            atom_colors=atom_colors,
+            static_traps=static_traps,
+            addressed_style=addressed_style,
+            show_motion_blur=show_motion_blur,
+            show_planned=show_planned,
+            planned_trajectory=planned_trajectory,
+            show_atom_ids=show_atom_ids,
+            trail_samples=trail_samples,
+            trail_duration=trail_duration,
+            planned_samples_per_segment=planned_samples_per_segment,
+            atom_size=atom_size,
+            trap_size=trap_size,
+            figsize=None if figsize == (12.0, 6.2) else figsize,
+            title=title,
+        )
+    if view != "detail":
+        raise ValueError("view must be 'demo', 'benchmark', or 'detail'")
 
     plt = _load_pyplot()
     ensemble = _as_ensemble(timeline)
+    style = _resolve_render_style(
+        quality,
+        dpi=None,
+        addressed_style=addressed_style,
+        show_motion_blur=show_motion_blur,
+        trail_samples=trail_samples,
+        tone_samples_per_segment=tone_samples_per_segment,
+        planned_samples_per_segment=planned_samples_per_segment,
+        atom_size=atom_size,
+        trap_size=trap_size,
+    )
     planned_mode = _resolve_planned_trajectory_mode(
         show_planned, planned_trajectory
     )
@@ -227,29 +517,31 @@ def plot_frame(
         static_traps=static_traps,
         time_unit=time_unit,
         frequency_label=frequency_label,
-        tone_samples_per_segment=tone_samples_per_segment,
+        tone_samples_per_segment=style.tone_samples_per_segment,
+        include_tones=True,
     )
     frame = _build_frame_payload(
         ensemble,
         float(t),
-        base["spec"],
-        timeline=timeline,
-        show_motion_blur=show_motion_blur,
+        spec=base["spec"],
+        motion=timeline,
+        include_tones=True,
+        show_motion_blur=style.show_motion_blur,
         planned_trajectory=planned_mode,
-        trail_samples=trail_samples,
+        trail_samples=style.trail_samples,
         trail_duration=trail_duration,
-        planned_samples_per_segment=planned_samples_per_segment,
+        planned_samples_per_segment=style.planned_samples_per_segment,
     )
     _plot_payload_frame(
         fig,
         axes_obj,
         base,
         frame,
-        addressed_style=addressed_style,
+        addressed_style=style.addressed_style,
         show_atom_ids=show_atom_ids,
         planned_trajectory=planned_mode,
-        atom_size=atom_size,
-        trap_size=trap_size,
+        atom_size=style.atom_size,
+        trap_size=style.trap_size,
         title=title,
     )
     return fig, axes_obj
@@ -261,10 +553,29 @@ def save_frame(
     output_path: str | Path,
     **plot_kwargs: Any,
 ) -> Path:
-    """Render one full frame to a PNG file."""
+    """Render one frame to a PNG file."""
 
     plt = _load_pyplot(force_agg=True)
-    dpi = int(plot_kwargs.pop("dpi", 120))
+    optimize = plot_kwargs.pop("optimize", None)
+    if "quality" not in plot_kwargs and optimize is not None:
+        plot_kwargs["quality"] = _normalize_optimize(optimize)
+    resolved_quality = _resolve_quality_option(plot_kwargs.get("quality"), None)
+    dpi = int(
+        plot_kwargs.pop(
+            "dpi",
+            _resolve_render_style(
+                resolved_quality,
+                dpi=None,
+                addressed_style=None,
+                show_motion_blur=None,
+                trail_samples=None,
+                tone_samples_per_segment=None,
+                planned_samples_per_segment=None,
+                atom_size=None,
+                trap_size=None,
+            ).dpi,
+        )
+    )
     fig, _ = plot_frame(timeline, t, **plot_kwargs)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -277,12 +588,15 @@ def render_animation(
     timeline: Any,
     output_path: str | Path,
     *,
+    view: RenderView = "demo",
+    quality: RenderQuality | None = None,
+    labels: Iterable[str] | None = None,
     fps: int = 20,
     n_frames: int | None = None,
     frame_dt: float = 10e-6,
     frame_times: Iterable[float] | None = None,
     hold_seconds: float = 1.0,
-    optimize: OptimizeMode = "speed",
+    optimize: OptimizeMode | None = None,
     use_multiprocessing: bool = True,
     workers: int | None = None,
     frames_dir: str | Path | None = None,
@@ -291,15 +605,16 @@ def render_animation(
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     static_traps: bool | Iterable[Site] = True,
     addressed_style: AddressedStyle | None = None,
-    show_motion_blur: bool = True,
+    show_motion_blur: bool | None = None,
     show_planned: bool = True,
     planned_trajectory: PlannedTrajectoryMode | None = None,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
     frequency_label: str = "nu / FSR1 (mod 1)",
-    figsize: tuple[float, float] = (12.0, 6.2),
+    figsize: tuple[float, float] | None = None,
     dpi: int | None = None,
     show_progress: bool = True,
+    title: str | None = None,
 ) -> Path:
     """Render a PNG frame sequence and combine it into a GIF.
 
@@ -321,21 +636,38 @@ def render_animation(
     if frame_dt <= 0:
         raise ValueError("frame_dt must be positive")
 
-    ensemble = _as_ensemble(timeline)
-    mode = _normalize_optimize(optimize)
+    if view not in ("demo", "benchmark", "detail"):
+        raise ValueError("view must be 'demo', 'benchmark', or 'detail'")
+
+    mode = _resolve_quality_option(quality, optimize)
+    style = _resolve_render_style(
+        mode,
+        dpi=dpi,
+        addressed_style=addressed_style,
+        show_motion_blur=show_motion_blur,
+        trail_samples=None,
+        tone_samples_per_segment=None,
+        planned_samples_per_segment=None,
+        atom_size=None,
+        trap_size=None,
+    )
     planned_mode = _resolve_planned_trajectory_mode(
         show_planned, planned_trajectory
     )
-    resolved_dpi = dpi if dpi is not None else (90 if mode == "speed" else 140)
-    resolved_style = addressed_style or ("edge" if mode == "speed" else "blob")
-    trail_samples = 5 if mode == "speed" else 12
-    tone_samples = 32 if mode == "speed" else 96
-    planned_samples = 18 if mode == "speed" else 48
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    total = ensemble.total_duration()
+    if view == "benchmark":
+        motion_items = _normalize_motion_items(timeline, labels)
+        if not motion_items:
+            raise ValueError("benchmark view needs at least one motion object")
+        total = max((_as_ensemble(motion).total_duration() for _, motion in motion_items), default=0.0)
+    else:
+        motion_items = []
+        ensemble = _as_ensemble(timeline)
+        total = ensemble.total_duration()
+
     if frame_times is None:
         if total <= 0:
             moving_times = np.array([0.0], dtype=float)
@@ -360,43 +692,116 @@ def render_animation(
         ]
     )
 
-    base = _build_base_payload(
-        ensemble,
-        spec=spec,
-        atom_colors=atom_colors,
-        static_traps=static_traps,
-        time_unit=time_unit,
-        frequency_label=frequency_label,
-        tone_samples_per_segment=tone_samples,
-    )
-    frame_payloads = [
-        _build_frame_payload(
+    if view == "benchmark":
+        panel_bases = []
+        for index, (label, motion) in enumerate(motion_items):
+            panel_ensemble = _as_ensemble(motion)
+            panel_bases.append(
+                {
+                    "label": label,
+                    "motion": motion,
+                    "ensemble": panel_ensemble,
+                    "base": _build_base_payload(
+                        panel_ensemble,
+                        spec=None,
+                        atom_colors=atom_colors,
+                        static_traps=_panel_value(static_traps, index, label),
+                        time_unit=time_unit,
+                        frequency_label=frequency_label,
+                        tone_samples_per_segment=style.tone_samples_per_segment,
+                        include_tones=False,
+                    ),
+                }
+            )
+        base = {
+            "view": "benchmark",
+            "panels": [
+                {"label": panel["label"], "base": panel["base"]}
+                for panel in panel_bases
+            ],
+        }
+        frame_payloads = [
+            {
+                "t": float(t),
+                "panels": [
+                    {
+                        "label": panel["label"],
+                        "frame": _build_frame_payload(
+                            panel["ensemble"],
+                            float(t),
+                            spec=None,
+                            motion=panel["motion"],
+                            include_tones=False,
+                            show_motion_blur=style.show_motion_blur,
+                            planned_trajectory=planned_mode,
+                            trail_samples=style.trail_samples,
+                            trail_duration=None,
+                            planned_samples_per_segment=style.planned_samples_per_segment,
+                        ),
+                    }
+                    for panel in panel_bases
+                ],
+            }
+            for t in _progress_iter(
+                frame_schedule,
+                total=len(frame_schedule),
+                desc="prepare frames",
+                enabled=show_progress,
+            )
+        ]
+    else:
+        include_tones = view == "detail"
+        base = _build_base_payload(
             ensemble,
-            float(t),
-            base["spec"],
-            timeline=timeline,
-            show_motion_blur=show_motion_blur,
-            planned_trajectory=planned_mode,
-            trail_samples=trail_samples,
-            trail_duration=None,
-            planned_samples_per_segment=planned_samples,
+            spec=spec,
+            atom_colors=atom_colors,
+            static_traps=static_traps,
+            time_unit=time_unit,
+            frequency_label=frequency_label,
+            tone_samples_per_segment=style.tone_samples_per_segment,
+            include_tones=include_tones,
         )
-        for t in _progress_iter(
-            frame_schedule,
-            total=len(frame_schedule),
-            desc="prepare frames",
-            enabled=show_progress,
-        )
-    ]
+        frame_payloads = [
+            _build_frame_payload(
+                ensemble,
+                float(t),
+                spec=base["spec"],
+                motion=timeline,
+                include_tones=include_tones,
+                show_motion_blur=style.show_motion_blur,
+                planned_trajectory=planned_mode,
+                trail_samples=style.trail_samples,
+                trail_duration=None,
+                planned_samples_per_segment=style.planned_samples_per_segment,
+            )
+            for t in _progress_iter(
+                frame_schedule,
+                total=len(frame_schedule),
+                desc="prepare frames",
+                enabled=show_progress,
+            )
+        ]
+
+    if figsize is None:
+        if view == "detail":
+            resolved_figsize = (12.0, 6.2)
+        elif view == "benchmark":
+            resolved_figsize = (max(4.0, 4.0 * len(motion_items)), 4.6)
+        else:
+            resolved_figsize = (5.4, 5.2)
+    else:
+        resolved_figsize = figsize
+
     options = {
-        "figsize": figsize,
-        "dpi": resolved_dpi,
-        "addressed_style": resolved_style,
+        "view": view,
+        "figsize": resolved_figsize,
+        "dpi": style.dpi,
+        "addressed_style": style.addressed_style,
         "show_atom_ids": show_atom_ids,
         "planned_trajectory": planned_mode,
-        "atom_size": 62.0 if mode == "speed" else 75.0,
-        "trap_size": 10.0 if mode == "speed" else 14.0,
-        "title": None,
+        "atom_size": style.atom_size,
+        "trap_size": style.trap_size,
+        "title": title,
     }
 
     if frames_dir is None and not keep_frames:
@@ -447,8 +852,23 @@ def render_check_outputs(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ensemble = _as_ensemble(timeline)
-    final_t = ensemble.total_duration()
+    visual_kwargs = {"view": "demo", **visual_kwargs}
+    if visual_kwargs.get("labels") is not None:
+        visual_kwargs["labels"] = list(visual_kwargs["labels"])
+    view = visual_kwargs.get("view", "demo")
+    if view == "benchmark":
+        final_t = max(
+            (
+                _as_ensemble(motion).total_duration()
+                for _, motion in _normalize_motion_items(
+                    timeline, visual_kwargs.get("labels")
+                )
+            ),
+            default=0.0,
+        )
+    else:
+        ensemble = _as_ensemble(timeline)
+        final_t = ensemble.total_duration()
     label = title_prefix or prefix
 
     paths = {
@@ -458,7 +878,6 @@ def render_check_outputs(
     animation_only = {
         "frames_dir",
         "keep_frames",
-        "optimize",
         "show_progress",
         "use_multiprocessing",
         "workers",
@@ -505,13 +924,14 @@ def render_check_outputs(
 
 
 def _as_ensemble(timeline: Any) -> AtomEnsemble:
+    """Return trajectories from either an AtomEnsemble or a Sequence-like object."""
     if isinstance(timeline, AtomEnsemble):
         return timeline
     ensemble = getattr(timeline, "ensemble", None)
     if isinstance(ensemble, AtomEnsemble):
         return ensemble
     raise TypeError(
-        "expected an AtomEnsemble or an object with an AtomEnsemble .ensemble"
+        "expected an AtomEnsemble or a Sequence-like object with .ensemble"
     )
 
 
@@ -534,13 +954,14 @@ def _build_base_payload(
     time_unit: Literal["s", "ms", "us", "ns"],
     frequency_label: str,
     tone_samples_per_segment: int,
+    include_tones: bool,
 ) -> dict[str, Any]:
     if time_unit not in _TIME_FACTORS:
         raise ValueError(f"unknown time_unit {time_unit!r}")
 
     grid = ensemble.grid
-    resolved_spec = spec or RIPASpec(N=grid.N, FSR1=DEFAULT_FSR1_GHZ)
-    if resolved_spec.N != grid.N:
+    resolved_spec = spec or (RIPASpec(N=grid.N, FSR1=DEFAULT_FSR1_GHZ) if include_tones else None)
+    if resolved_spec is not None and resolved_spec.N != grid.N:
         raise ValueError(f"RIPASpec.N={resolved_spec.N} does not match grid.N={grid.N}")
 
     atom_ids = [int(a.atom_id) for a in ensemble.atomtrajs]
@@ -548,10 +969,15 @@ def _build_base_payload(
     grid_sites = _all_grid_sites(grid.N)
     grid_xy = grid.ij_to_xy(grid_sites)
     static_xy = _resolve_static_traps(grid, static_traps)
-    row_trajs, col_trajs = _collect_tone_trajectories(
-        ensemble, resolved_spec, max(2, int(tone_samples_per_segment))
-    )
-    tone_hardware = _tone_hardware_name(ensemble)
+    if include_tones:
+        assert resolved_spec is not None
+        row_trajs, col_trajs = _collect_tone_trajectories(
+            ensemble, resolved_spec, max(2, int(tone_samples_per_segment))
+        )
+        tone_hardware = _tone_hardware_name(ensemble)
+    else:
+        row_trajs, col_trajs = [], []
+        tone_hardware = "tone"
     lo, hi = _site_extent_um(grid)
 
     return {
@@ -579,15 +1005,19 @@ def _build_base_payload(
 def _build_frame_payload(
     ensemble: AtomEnsemble,
     t: float,
-    spec: RIPASpec,
+    spec: RIPASpec | None,
     *,
-    timeline: Any | None = None,
+    motion: Any | None = None,
+    include_tones: bool,
     show_motion_blur: bool,
     planned_trajectory: PlannedTrajectoryMode,
     trail_samples: int,
     trail_duration: float | None,
     planned_samples_per_segment: int,
 ) -> dict[str, Any]:
+    if include_tones and spec is None:
+        raise ValueError("tone panels need a RIPASpec")
+
     positions_ij = ensemble.positions_at(t)
     positions_xy = ensemble.grid.ij_to_xy(positions_ij)
     active_indices: list[int] = []
@@ -595,7 +1025,7 @@ def _build_frame_payload(
     col_active: list[dict[str, Any]] = []
     trails: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
-    aod_traps_xy = _active_aod_traps_xy(timeline, ensemble, t)
+    aod_traps_xy = _active_aod_traps_xy(motion, ensemble, t)
 
     for idx, atom in enumerate(ensemble.atomtrajs):
         seg = _active_segment(atom, t)
@@ -603,7 +1033,8 @@ def _build_frame_payload(
             active_indices.append(idx)
             channels = _channels_for_segment(seg)
             pos = atom.position_at(t)
-            if "row" in channels:
+            if include_tones and "row" in channels:
+                assert spec is not None
                 row_active.append(
                     {
                         "idx": idx,
@@ -611,7 +1042,8 @@ def _build_frame_payload(
                         "freq": _tone_frequency("row", pos, spec, segment=seg),
                     }
                 )
-            if "col" in channels:
+            if include_tones and "col" in channels:
+                assert spec is not None
                 col_active.append(
                     {
                         "idx": idx,
@@ -687,6 +1119,7 @@ def _plot_payload_frame(
         show_atom_ids=show_atom_ids,
         atom_size=atom_size,
         trap_size=trap_size,
+        title=None,
     )
     _plot_current_tones_payload(axes.row_tones, base, frame, "row")
     _plot_current_tones_payload(axes.col_tones, base, frame, "col")
@@ -712,6 +1145,7 @@ def _plot_atom_plane_payload(
     show_atom_ids: bool,
     atom_size: float,
     trap_size: float,
+    title: str | None,
 ) -> None:
     ax.clear()
     ax.set_facecolor("white")
@@ -840,7 +1274,7 @@ def _plot_atom_plane_payload(
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x (um)")
     ax.set_ylabel("y (um)")
-    ax.set_title(f"atom plane  -  t = {_format_time(frame['t'], 'us')}")
+    ax.set_title(title or f"atom motion  -  t = {_format_time(frame['t'], 'us')}")
 
 
 def _tone_panel_title(channel: ToneChannel, hardware: ToneHardware) -> str:
@@ -1310,12 +1744,18 @@ def _tone_frequency(
     *,
     segment: Segment,
 ) -> float:
+    """RF frequency for the hardware channel that generated `segment`.
+
+    RIPA row/col moves use the spectrometer mapping from `ripa_freq.py`.
+    AOD lattice moves use one separable RF tone per selected row/column, so
+    their displayed frequency is based only on that row or column coordinate.
+    """
     if segment.channel == "aod":
-        return _aod_tone_frequency(channel, position_ij, spec)
-    return _ripa_tone_frequency(channel, position_ij, spec)
+        return _aod_rf_frequency(channel, position_ij, spec)
+    return _ripa_eom_frequency(channel, position_ij, spec)
 
 
-def _ripa_tone_frequency(
+def _ripa_eom_frequency(
     channel: ToneChannel,
     position_ij: tuple[float, float],
     spec: RIPASpec,
@@ -1324,11 +1764,12 @@ def _ripa_tone_frequency(
     return nu_row(i, j, spec) if channel == "row" else nu_col(i, j, spec)
 
 
-def _aod_tone_frequency(
+def _aod_rf_frequency(
     channel: ToneChannel,
     position_ij: tuple[float, float],
     spec: RIPASpec,
 ) -> float:
+    """AOD tone for a row/column deflection, normalized to the same FSR."""
     i, j = position_ij
     coordinate = i if channel == "row" else j
     return (float(coordinate) * spec.fsr2()) % spec.FSR1
@@ -1403,6 +1844,116 @@ def _coerce_visualization_axes(
     return VisualizationAxes(*axes)
 
 
+def _normalize_motion_items(
+    motions: Mapping[str, Any] | Iterable[Any],
+    labels: Iterable[str] | None,
+) -> list[tuple[str, Any]]:
+    if isinstance(motions, Mapping):
+        items = [(str(label), motion) for label, motion in motions.items()]
+        if labels is None:
+            return items
+        label_list = [str(label) for label in labels]
+        if len(label_list) != len(items):
+            raise ValueError("labels length must match benchmark motion count")
+        return [(label, motion) for label, (_, motion) in zip(label_list, items)]
+
+    motion_list = list(motions)
+    if labels is None:
+        label_list = [f"scheduler {index + 1}" for index in range(len(motion_list))]
+    else:
+        label_list = [str(label) for label in labels]
+        if len(label_list) != len(motion_list):
+            raise ValueError("labels length must match benchmark motion count")
+    return list(zip(label_list, motion_list))
+
+
+def _panel_value(value: Any, index: int, label: str) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(label, True)
+    return value
+
+
+def _normalize_render_quality(quality: RenderQuality) -> RenderQuality:
+    if quality in ("speed", "quality"):
+        return quality
+    raise ValueError("quality must be 'speed' or 'quality'")
+
+
+def _resolve_quality_option(
+    quality: RenderQuality | None,
+    optimize: OptimizeMode | None,
+) -> RenderQuality:
+    if quality is not None:
+        return _normalize_render_quality(quality)
+    if optimize is not None:
+        return _normalize_optimize(optimize)
+    return "speed"
+
+
+def _resolve_render_style(
+    quality: RenderQuality,
+    *,
+    dpi: int | None,
+    addressed_style: AddressedStyle | None,
+    show_motion_blur: bool | None,
+    trail_samples: int | None,
+    tone_samples_per_segment: int | None,
+    planned_samples_per_segment: int | None,
+    atom_size: float | None,
+    trap_size: float | None,
+) -> RenderStyle:
+    mode = _normalize_render_quality(quality)
+    defaults = (
+        RenderStyle(
+            dpi=90,
+            addressed_style="edge",
+            show_motion_blur=False,
+            trail_samples=0,
+            tone_samples_per_segment=32,
+            planned_samples_per_segment=18,
+            atom_size=62.0,
+            trap_size=10.0,
+        )
+        if mode == "speed"
+        else RenderStyle(
+            dpi=150,
+            addressed_style="both",
+            show_motion_blur=True,
+            trail_samples=12,
+            tone_samples_per_segment=96,
+            planned_samples_per_segment=48,
+            atom_size=75.0,
+            trap_size=14.0,
+        )
+    )
+
+    blur = defaults.show_motion_blur if show_motion_blur is None else show_motion_blur
+    trails = defaults.trail_samples if trail_samples is None else int(trail_samples)
+    if blur and trail_samples is None and trails == 0:
+        trails = 5
+    if not blur:
+        trails = 0
+
+    return RenderStyle(
+        dpi=defaults.dpi if dpi is None else int(dpi),
+        addressed_style=addressed_style or defaults.addressed_style,
+        show_motion_blur=bool(blur),
+        trail_samples=max(0, trails),
+        tone_samples_per_segment=(
+            defaults.tone_samples_per_segment
+            if tone_samples_per_segment is None
+            else int(tone_samples_per_segment)
+        ),
+        planned_samples_per_segment=(
+            defaults.planned_samples_per_segment
+            if planned_samples_per_segment is None
+            else int(planned_samples_per_segment)
+        ),
+        atom_size=defaults.atom_size if atom_size is None else float(atom_size),
+        trap_size=defaults.trap_size if trap_size is None else float(trap_size),
+    )
+
+
 def _format_time(t: float, unit: Literal["s", "ms", "us", "ns"]) -> str:
     value = t * _TIME_FACTORS[unit]
     if abs(value) >= 100:
@@ -1412,7 +1963,7 @@ def _format_time(t: float, unit: Literal["s", "ms", "us", "ns"]) -> str:
     return f"{value:.3f} {unit}"
 
 
-def _normalize_optimize(optimize: OptimizeMode) -> Literal["speed", "quality"]:
+def _normalize_optimize(optimize: OptimizeMode) -> RenderQuality:
     if optimize in ("speed", "performance"):
         return "speed"
     if optimize == "quality":
@@ -1569,31 +2120,63 @@ def _render_payload_to_png(
     fig = plt.figure(
         figsize=options["figsize"], dpi=options["dpi"], constrained_layout=True
     )
-    gs = fig.add_gridspec(
-        2,
-        3,
-        width_ratios=(2.5, 1.0, 1.0),
-        height_ratios=(1.0, 1.0),
-    )
-    axes = VisualizationAxes(
-        atom=fig.add_subplot(gs[:, 0]),
-        row_tones=fig.add_subplot(gs[0, 1]),
-        col_tones=fig.add_subplot(gs[0, 2]),
-        row_trajectories=fig.add_subplot(gs[1, 1]),
-        col_trajectories=fig.add_subplot(gs[1, 2]),
-    )
-    _plot_payload_frame(
-        fig,
-        axes,
-        base,
-        frame,
-        addressed_style=options["addressed_style"],
-        show_atom_ids=bool(options["show_atom_ids"]),
-        planned_trajectory=options["planned_trajectory"],
-        atom_size=float(options["atom_size"]),
-        trap_size=float(options["trap_size"]),
-        title=options.get("title"),
-    )
+    view = options.get("view", "detail")
+    if view == "demo":
+        ax = fig.add_subplot(1, 1, 1)
+        _plot_atom_plane_payload(
+            ax,
+            base,
+            frame,
+            addressed_style=options["addressed_style"],
+            show_atom_ids=bool(options["show_atom_ids"]),
+            atom_size=float(options["atom_size"]),
+            trap_size=float(options["trap_size"]),
+            title=options.get("title"),
+        )
+    elif view == "benchmark":
+        panels = list(base["panels"])
+        gs = fig.add_gridspec(1, len(panels))
+        for index, (panel, panel_frame) in enumerate(zip(panels, frame["panels"])):
+            ax = fig.add_subplot(gs[0, index])
+            title = f"{panel['label']}  -  t = {_format_time(frame['t'], 'us')}"
+            _plot_atom_plane_payload(
+                ax,
+                panel["base"],
+                panel_frame["frame"],
+                addressed_style=options["addressed_style"],
+                show_atom_ids=bool(options["show_atom_ids"]),
+                atom_size=float(options["atom_size"]),
+                trap_size=float(options["trap_size"]),
+                title=title,
+            )
+        if options.get("title"):
+            fig.suptitle(options["title"])
+    else:
+        gs = fig.add_gridspec(
+            2,
+            3,
+            width_ratios=(2.5, 1.0, 1.0),
+            height_ratios=(1.0, 1.0),
+        )
+        axes = VisualizationAxes(
+            atom=fig.add_subplot(gs[:, 0]),
+            row_tones=fig.add_subplot(gs[0, 1]),
+            col_tones=fig.add_subplot(gs[0, 2]),
+            row_trajectories=fig.add_subplot(gs[1, 1]),
+            col_trajectories=fig.add_subplot(gs[1, 2]),
+        )
+        _plot_payload_frame(
+            fig,
+            axes,
+            base,
+            frame,
+            addressed_style=options["addressed_style"],
+            show_atom_ids=bool(options["show_atom_ids"]),
+            planned_trajectory=options["planned_trajectory"],
+            atom_size=float(options["atom_size"]),
+            trap_size=float(options["trap_size"]),
+            title=options.get("title"),
+        )
     fig.savefig(path, dpi=options["dpi"], facecolor="white")
     plt.close(fig)
 

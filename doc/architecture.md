@@ -11,9 +11,11 @@ Collision validation is built into `AtomEnsemble.append_segment(...)`. It sample
 
 ## Visualization
 
-[`src/visualization.py`](../src/visualization.py) renders existing `Sequence` or `AtomEnsemble` timelines.
+[`src/visualization.py`](../src/visualization.py) renders existing `Sequence` or `AtomEnsemble` motion.
 
-- `plot_atom_plane(ax, timeline, t, ...)`: atom plane, static traps, addressed atoms, trails, planned paths.
+- `plot_atom_motion(ax, motion, t, ...)`: reusable atom plane, static traps, addressed atoms, optional trails, planned paths.
+- `plot_demo_frame(...)`: one atom-motion plot.
+- `plot_benchmark_frame(...)`: one row of atom-motion plots for several schedulers.
 - `plot_frequency_tones(axes, timeline, t, ...)`: current row/col tones and tone trajectories.
-- `plot_frame(...)` / `save_frame(...)`: combined atom-plane plus frequency panels.
-- `render_gif(...)` / `render_animation(...)`: frame rendering plus GIF export, with optional multiprocessing.
+- `plot_frame(...)` / `save_frame(...)`: dispatches `view="demo"`, `view="benchmark"`, or `view="detail"`.
+- `render_animation(...)`: frame rendering plus GIF export, with optional multiprocessing and `quality="speed" | "quality"`.

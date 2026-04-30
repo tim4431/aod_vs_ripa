@@ -9,8 +9,8 @@
 - When atom is moving, add a "motion-blur" trail effect to show its speed.
 - Add a switch to the visualizer to show its planned trajectories after the current time t.
 - The visualizer for showing atoms, eom tones, should all be modularized (pass in a ax params, just plot on ax).
-- I want an animation render. On the left, show atom plane. On the right, show RIPA/AOD frequency tones, and their time trajectories. See [](vis_example.png).
-- The animation render generate pictures and save as gif. Use multiprocessing to accelerate gif creating speed. Have a switch to optimize for speed or performance.
+- Visualization has three views: `demo` (one atom-motion plot), `benchmark` (one row of atom-motion plots for several schedulers), and `detail` (atom plane plus RIPA/AOD frequency tones and trajectories). See [](vis_example.png) for the detail view.
+- The animation render generate pictures and save as gif. Use multiprocessing to accelerate gif creating speed. The `quality` switch is `speed` or `quality`; speed skips Gaussian blobs and motion blur, quality uses higher DPI and motion trails.
 - GIF moving-frame count is proportional to the total rearrangement time by default, using one rendered frame every `frame_dt` seconds. Pass an explicit `n_frames` only when a fixed sample count is wanted.
 - Before the re-arrangement start, and after the re-arrangment ends, stop for 1 second in gif for better animation.
 
