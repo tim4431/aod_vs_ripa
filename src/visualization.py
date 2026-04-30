@@ -78,7 +78,7 @@ def plot_atom_plane(
         atom_colors=atom_colors,
         static_traps=static_traps,
         time_unit="us",
-        frequency_label="Delta nu (GHz, mod FSR1)",
+        frequency_label="nu / FSR1 (mod 1)",
         tone_samples_per_segment=48,
     )
     frame = _build_frame_payload(
@@ -113,7 +113,7 @@ def plot_frequency_tones(
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     show_future: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
-    frequency_label: str = "Delta nu (GHz, mod FSR1)",
+    frequency_label: str = "nu / FSR1 (mod 1)",
     tone_samples_per_segment: int = 64,
 ) -> Any:
     """Draw row/col EOM tone panels on a 2x2 axes object.
@@ -165,7 +165,7 @@ def plot_frame(
     show_planned: bool = True,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
-    frequency_label: str = "Delta nu (GHz, mod FSR1)",
+    frequency_label: str = "nu / FSR1 (mod 1)",
     tone_samples_per_segment: int = 64,
     trail_samples: int = 8,
     trail_duration: float | None = None,
@@ -275,7 +275,7 @@ def render_animation(
     show_planned: bool = True,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
-    frequency_label: str = "Delta nu (GHz, mod FSR1)",
+    frequency_label: str = "nu / FSR1 (mod 1)",
     figsize: tuple[float, float] = (12.0, 6.2),
     dpi: int | None = None,
 ) -> Path:
@@ -798,7 +798,7 @@ def _plot_current_tones_payload(
     colors = base["colors"]
     for entry in entries:
         idx = int(entry["idx"])
-        freq = float(entry["freq"])
+        freq = _frequency_for_display(float(entry["freq"]), spec)
         color = colors[idx]
         ax.vlines(freq, 0.0, 1.0, color=color, linewidth=2.5, alpha=0.9)
         ax.scatter([freq], [1.0], c=[color], s=22.0, zorder=3)
@@ -810,9 +810,10 @@ def _plot_current_tones_payload(
             va="bottom",
             fontsize=6,
             color=_darken_color(color),
+            clip_on=True,
         )
 
-    ax.set_xlim(-spec.FSR1 / 2.0, spec.FSR1 / 2.0)
+    ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.2)
     ax.set_xlabel(base["frequency_label"])
     ax.set_ylabel("amplitude")
@@ -837,14 +838,14 @@ def _plot_tone_history_payload(
 
     for traj in trajs:
         ts = np.asarray(traj["times"], dtype=float)
-        nus = np.asarray(traj["freqs"], dtype=float)
+        nus = _frequencies_for_display(np.asarray(traj["freqs"], dtype=float), spec)
         idx = int(traj["idx"])
         if show_future:
             _plot_wrapped_frequency_line(
                 ax,
                 ts * time_factor,
                 nus,
-                spec.FSR1,
+                1.0,
                 color=colors[idx],
                 linewidth=1.4,
                 alpha=0.35,
@@ -856,7 +857,7 @@ def _plot_tone_history_payload(
                     ax,
                     ts[mask] * time_factor,
                     nus[mask],
-                    spec.FSR1,
+                    1.0,
                     color=colors[idx],
                     linewidth=1.4,
                     alpha=0.45,
@@ -866,7 +867,7 @@ def _plot_tone_history_payload(
     x_hi = max(total * time_factor, 1.0)
     ax.axvline(t_now * time_factor, color="#b8b8b8", linewidth=1.0)
     ax.set_xlim(0.0, x_hi)
-    ax.set_ylim(-spec.FSR1 / 2.0, spec.FSR1 / 2.0)
+    ax.set_ylim(0.0, 1.0)
     ax.set_xlabel(f"t ({base['time_unit']})")
     ax.set_ylabel(base["frequency_label"])
     ax.grid(True, color="#e5e5e5", linewidth=0.6)
@@ -889,6 +890,20 @@ def _plot_wrapped_frequency_line(
     for start, end in zip(starts, ends):
         if end - start >= 2:
             ax.plot(xs[start:end], ys[start:end], **plot_kwargs)
+
+
+def _frequency_for_display(
+    nu: float,
+    spec: RIPASpec,
+) -> float:
+    return float((nu % spec.FSR1) / spec.FSR1)
+
+
+def _frequencies_for_display(
+    nus: np.ndarray,
+    spec: RIPASpec,
+) -> np.ndarray:
+    return np.mod(nus, spec.FSR1) / spec.FSR1
 
 
 def _draw_gaussian_blob(ax: Any, x: float, y: float, sigma: float) -> None:

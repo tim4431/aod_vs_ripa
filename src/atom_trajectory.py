@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .atom_config import AtomConfig, Grid
-from .segments import Segment
+from .segments import Segment, make_hold
 
 _TIME_TOL = 1e-12
 
@@ -574,8 +574,35 @@ class AtomEnsemble:
     def check_segment(self, atom_id: int, segment: Segment) -> CollisionReport:
         """Non-mutating: would `segment` collide if appended? Also
         verifies continuity (raises ValueError on continuity failure)."""
-        self.atomtraj_by_id(atom_id)._check_continuity(segment)
-        return self._check_collision(atom_id, segment)
+        atomtraj = self.atomtraj_by_id(atom_id)
+        atomtraj._check_continuity(segment)
+
+        if segment.start_time > atomtraj.final_time + _TIME_TOL:
+            pre_hold = make_hold(
+                atomtraj.final_pos,
+                atomtraj.final_time,
+                segment.start_time - atomtraj.final_time,
+            )
+            rep = self._check_collision(atom_id, pre_hold)
+            if not rep.ok:
+                return rep
+
+        rep = self._check_collision(atom_id, segment)
+        if not rep.ok:
+            return rep
+
+        horizon = self.total_duration()
+        if horizon > segment.end_time + _TIME_TOL:
+            post_hold = make_hold(
+                segment.end_pos,
+                segment.end_time,
+                horizon - segment.end_time,
+            )
+            rep = self._check_collision(atom_id, post_hold)
+            if not rep.ok:
+                return rep
+
+        return rep
 
     # ---- mutation -----------------------------------------------------------
 

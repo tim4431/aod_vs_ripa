@@ -12,10 +12,11 @@
 | `Step`, `AODStep`, `RIPAStep` | scheduler commands that append segments to an ensemble | [`src/movement.py`](../src/movement.py) |
 | `Sequence` | ordered steps, initial config, ensemble state, timing helpers | [`src/sequence.py`](../src/sequence.py) |
 | `RoutingRequest` | routing input: `grid`, `src`, `dst`, `labeled` | [`src/routing.py`](../src/routing.py) |
-| `Scheduler`, `SyncScheduler` | request-to-sequence planners with clock-cycle helpers | [`src/scheduler/`](../src/scheduler/) |
+| `Scheduler`, `SyncScheduler`, `AsyncScheduler` | request-to-sequence planners with clock-cycle and async helpers | [`src/scheduler/`](../src/scheduler/) |
 | `SqrtTimeAODScheduler` / `AODSqrtTimeScheduler` | unlabeled AOD planner translated from the sqrt-time reference repo | [`src/scheduler/aod_sqrt_time.py`](../src/scheduler/aod_sqrt_time.py) |
 | `NaiveRIPAScheduler` | simple direct single-atom RIPA baseline | [`src/scheduler/naive.py`](../src/scheduler/naive.py) |
 | `RIPANaiveSyncScheduler` | clocked highway-based RIPA baseline that greedily maximizes same-cycle throughput | [`src/scheduler/ripa_naive_sync.py`](../src/scheduler/ripa_naive_sync.py) |
+| `RIPAPebbleScheduler` | asynchronous highway-aware RIPA scheduler inspired by pebble/MAPF planning | [`src/scheduler/ripa_pebble.py`](../src/scheduler/ripa_pebble.py) |
 | `benchmark_schedulers` | compare scheduler arrangement durations on the same request | [`src/benchmark.py`](../src/benchmark.py) |
 | `RIPASpec`, `nu_row`, `nu_col` | RIPA position-to-frequency mapping | [`src/ripa_freq.py`](../src/ripa_freq.py) |
 
@@ -37,13 +38,15 @@ All segment times are absolute. `Sequence.next_start_time()` returns the current
 
 `RIPANaiveSyncScheduler` assumes an M-period storage/highway pattern, e.g. `M=2` means even rows/columns hold atoms and odd rows/columns are highways. Each clock cycle it proposes one next RIPA leg per unfinished atom, scores route options by path length, lane load, and occupied blockers, then commits the largest greedy collision-free same-start batch. Individual RIPA legs keep their own durations; the next clock cycle starts after the slowest leg in the batch. For unlabeled requests it first assigns atoms to targets by estimated highway route cost, using exact dynamic programming for small atom counts and a greedy fallback for larger ones.
 
+`RIPAPebbleScheduler` keeps the same storage/highway convention but drops global clock cycles. It builds short macro routes made of long row/column RIPA legs, assigns unlabeled atoms by estimated route cost, and appends each leg at the earliest safe atom-specific start time. On a timed collision it advances the start time and retries; if a lane remains blocked it tries alternate highways or clear auxiliary storage lanes. This is a prioritized/SIPP-style heuristic, not an optimal CBS solver.
+
 Schedulers that search or backtrack should evaluate candidates with `Scheduler.evaluate_steps(...)`, `SyncScheduler.evaluate_cycle(...)`, or `Scheduler.evaluate_candidate(...)`. These helpers replay the current `Sequence` into a fresh trial sequence, append the candidate there, and score it with `Scheduler.cost(...)` (default: total arrangement duration). The live sequence is changed only when `commit_trial(...)` is called on a successful trial.
 
 Use `benchmark_schedulers(request, schedulers, validate_dt=...)` to compare total arrangement time across scheduler factories. It returns per-scheduler results including physical total duration, planning wall time, step count, segment count, and clock cycles when available.
 
 ## Validation
 
-Collision validation is built into `AtomEnsemble.append_segment(...)`. It samples candidate motion against every other atom using `ensemble.collision_dt` and compares physical distances to `grid.rc`. `Sequence.validate(dt)` replays the stored steps at a different sampling interval.
+Collision validation is built into `AtomEnsemble.append_segment(...)`. It samples candidate motion against every other atom using `ensemble.collision_dt` and compares physical distances to `grid.rc`. For asynchronous appends, `AtomEnsemble.check_segment(...)` also validates the addressed atom's implicit rest before the new segment and, when there is already a longer planned horizon, its implicit rest after the segment. This prevents out-of-order async planning from creating hidden endpoint conflicts. `Sequence.validate(dt)` replays the stored steps at a different sampling interval.
 
 ## Visualization
 

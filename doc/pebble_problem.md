@@ -173,9 +173,22 @@ the existing trajectory validator as the source of truth.
 
 - `RIPANaiveSyncScheduler` is a useful baseline, but it waits for the slowest leg
   in each cycle. The next scheduler should allow atom-specific start times.
+- `RIPAPebbleScheduler` is the first asynchronous implementation of this idea.
+  It is a prioritized/SIPP-style heuristic rather than an optimal CBS solver:
+  it picks short macro routes through highways, appends one RIPA leg at the
+  earliest safe start time for that atom, and advances the start time when the
+  trajectory validator reports a timed collision.
 - Waiting does not need a new movement primitive if atoms simply remain in their
   last resting site until their next segment. The planner does need to reserve
   that resting site during the wait.
+- For unlabeled requests, `RIPAPebbleScheduler` estimates every source-target
+  route cost and solves an exact bitmask DP assignment for modest atom counts
+  before falling back to greedy assignment. This keeps the assignment sensitive
+  to highways and handoff costs rather than only Euclidean distance.
+- The current implementation uses alternate highways and currently clear
+  storage rows/columns as auxiliary lanes. It does not yet perform explicit
+  blocker-clearing moves, CCBS branching, or post-plan compression beyond the
+  earliest-safe retries.
 - Same-start RIPA batches may need true batch validation. Sequentially appending
   same-time moves can falsely reject a move into a site that another atom vacates
   simultaneously. `AtomEnsemble.append_segments_batch(...)` already has the right
@@ -188,4 +201,3 @@ the existing trajectory validator as the source of truth.
   - an asynchronous prioritized/SIPP scheduler,
   - the same scheduler with reassignment enabled,
   - the same scheduler with blocker-clearing enabled.
-
