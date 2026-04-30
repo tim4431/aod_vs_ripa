@@ -155,6 +155,42 @@ def draw_aod_traps(ax: Any, sequence: Any, t: float) -> None:
     )
 
 
+def draw_routing_request(
+    ax: Any,
+    ensemble: AtomEnsemble,
+    *,
+    colors: list[Any] | None = None,
+) -> None:
+    """Draw a per-atom arrow from its initial site to its final site.
+
+    For unlabeled requests, the realized atom-by-atom pairing is what the
+    scheduler chose, not the abstract source/target sets — this primitive
+    walks the actual ensemble state, so the arrows always reflect the
+    pairwise routing that the run produced.
+    """
+    colors = colors or _default_colors(ensemble)
+    grid = ensemble.grid
+    initial_xy = grid.ij_to_xy(ensemble.positions_at(0.0))
+    final_xy = grid.ij_to_xy(ensemble.positions_at(ensemble.total_duration()))
+    for (x0, y0), (x1, y1), color in zip(initial_xy, final_xy, colors):
+        if math.isclose(x0, x1) and math.isclose(y0, y1):
+            continue
+        ax.annotate(
+            "",
+            xy=(x1, y1),
+            xytext=(x0, y0),
+            arrowprops=dict(
+                arrowstyle="->",
+                color=color,
+                lw=1.6,
+                alpha=0.75,
+                shrinkA=4,
+                shrinkB=4,
+            ),
+            zorder=2.6,
+        )
+
+
 def draw_planned_paths(
     ax: Any,
     ensemble: AtomEnsemble,
@@ -363,9 +399,10 @@ def draw_atom_panel(
     static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "full",
     show_atom_ids: bool = False,
+    show_routing: bool = False,
     title: str | None = None,
 ) -> None:
-    """Compose one atom-plane panel by calling the seven visual primitives in z-order."""
+    """Compose one atom-plane panel by calling the visual primitives in z-order."""
     style = _QUALITY[quality]
     if isinstance(motion, AtomEnsemble):
         ensemble, sequence = motion, None
@@ -378,6 +415,8 @@ def draw_atom_panel(
     draw_grid_dots(ax, ensemble.grid)
     if static_traps is not None:
         draw_static_traps(ax, ensemble.grid, static_traps)
+    if show_routing:
+        draw_routing_request(ax, ensemble, colors=colors)
     draw_planned_paths(
         ax, ensemble, t, mode=planned_trajectory, colors=colors,
         samples=style.planned_samples_per_segment,
@@ -410,6 +449,7 @@ def draw_frame(
     static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "full",
     show_atom_ids: bool = False,
+    show_routing: bool = False,
     title: str | None = None,
 ) -> tuple[Any, list[Any]]:
     """Build a fresh figure for `view` and draw the primitives on it; return (fig, axes)."""
@@ -420,7 +460,7 @@ def draw_frame(
         draw_atom_panel(
             ax, motion, t, quality=quality, atom_colors=atom_colors,
             static_traps=static_traps, planned_trajectory=planned_trajectory,
-            show_atom_ids=show_atom_ids, title=title,
+            show_atom_ids=show_atom_ids, show_routing=show_routing, title=title,
         )
         return fig, [ax]
 
@@ -438,7 +478,7 @@ def draw_frame(
             draw_atom_panel(
                 ax, panel_motion, t, quality=quality, atom_colors=atom_colors,
                 static_traps=static_traps, planned_trajectory=planned_trajectory,
-                show_atom_ids=show_atom_ids,
+                show_atom_ids=show_atom_ids, show_routing=show_routing,
                 title=f"{label}  -  t = {_format_time_us(t)}",
             )
         if title:
@@ -462,7 +502,7 @@ def draw_frame(
         draw_atom_panel(
             atom_ax, motion, t, quality=quality, atom_colors=atom_colors,
             static_traps=static_traps, planned_trajectory=planned_trajectory,
-            show_atom_ids=show_atom_ids, title=None,
+            show_atom_ids=show_atom_ids, show_routing=show_routing, title=None,
         )
         draw_current_tones(row_now, ensemble, t, "row", colors=colors)
         draw_current_tones(col_now, ensemble, t, "col", colors=colors)
@@ -511,6 +551,7 @@ def render_animation(
     static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "full",
     show_atom_ids: bool = False,
+    show_routing_on_start: bool = True,
     title: str | None = None,
     show_progress: bool = True,
 ) -> Path:
@@ -579,7 +620,10 @@ def render_animation(
                 enabled=show_progress,
             )
         ):
-            fig, _ = draw_frame(motion, float(t), **draw_kwargs)
+            show_routing = show_routing_on_start and k < hold_count
+            fig, _ = draw_frame(
+                motion, float(t), show_routing=show_routing, **draw_kwargs
+            )
             path = tmp_path / f"frame_{k:05d}.png"
             fig.savefig(path, dpi=dpi, facecolor="white")
             plt.close(fig)

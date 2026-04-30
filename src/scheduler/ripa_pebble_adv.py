@@ -7,9 +7,10 @@ any site visible along its row or column without crossing an occupied site.
 
 The route graph therefore discovers long clear corridors when the atom
 configuration happens to provide them, but it does not manufacture highways by
-convention. For dense target-set assembly, the scheduler uses a staged
-pebble-style plan: clear the target region into buffer sites, reopen boundary
-gates when needed, then refill the target from the inside outward.
+convention. For unlabeled target-set assembly, the scheduler compacts atoms
+inward: atoms already in the target region are kept whenever possible, empty
+interior sites are filled first, and vacancies are slid outward rather than
+evacuating the whole target region.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import heapq
 import math
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 
 from ..atom_trajectory import CollisionError
 from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
@@ -52,7 +53,8 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     wait_padding: float | None = None
     handoff_weight: float = 0.35
     staged_target_fill: bool = True
-    parallel_staging: bool = True
+    async_staging: bool = True
+    """Use per-atom async starts for staged moves; false serializes each staged leg."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -86,11 +88,14 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     def _plan(self) -> None:
         if (
             self.staged_target_fill
-            and not self.request.labeled
             and len(self.request.dst) == len(self.request.src)
-            and len(self.request.dst) <= (self.request.grid.N * self.request.grid.N) // 2
+            and len(self.request.dst)
+            <= (self.request.grid.N * self.request.grid.N) // 2
         ):
-            self._plan_unlabeled_target_set_with_fallback()
+            if self.request.labeled:
+                self._plan_labeled_target_set_with_fallback()
+            else:
+                self._plan_unlabeled_target_set_with_fallback()
             return
 
         self._plan_assigned_routes(self.target_assignment())
@@ -98,21 +103,28 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     # ---- staged target-set assembly ---------------------------------------
 
     def _plan_unlabeled_target_set_with_fallback(self) -> None:
-        if not self.parallel_staging:
-            self._plan_unlabeled_target_set()
+        self._run_staged_with_fallback(self._plan_unlabeled_target_set)
+
+    def _plan_labeled_target_set_with_fallback(self) -> None:
+        self._run_staged_with_fallback(self._plan_labeled_target_set)
+
+    def _run_staged_with_fallback(self, plan: Callable[[], None]) -> None:
+        if not self.async_staging:
+            plan()
             return
 
+        original_async = self.async_staging
         try:
-            self._plan_unlabeled_target_set()
+            plan()
             return
         except RuntimeError:
             self._reset_sequence()
 
-        self.parallel_staging = False
+        self.async_staging = False
         try:
-            self._plan_unlabeled_target_set()
+            plan()
         finally:
-            self.parallel_staging = True
+            self.async_staging = original_async
 
     def _reset_sequence(self) -> None:
         super().__post_init__()
@@ -122,34 +134,163 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         target_sites = {tuple(site) for site in self.request.dst}
         depths = self._target_depths(target_sites)
 
-        self._clear_target_region(target_sites, depths)
-        self._fill_target_region(target_sites, depths)
+        self._compact_unlabeled_target_set(target_sites, depths)
 
-    def _clear_target_region(
+    def _compact_unlabeled_target_set(
         self,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+    ) -> None:
+        max_rounds = max(
+            1,
+            8 * self.request.grid.N * self.request.grid.N * max(1, len(target_sites)),
+        )
+        for _ in range(max_rounds):
+            occ = self._final_occupancy()
+            if target_sites <= set(occ):
+                return
+
+            move = self._best_unlabeled_compaction_move(target_sites, depths, occ)
+            if move is not None:
+                atom_id, path = move
+                self._append_path(
+                    atom_id,
+                    path,
+                    sequential=not self.async_staging,
+                )
+                continue
+
+            if self._relieve_target_gate(target_sites, occ):
+                continue
+
+            raise RuntimeError(
+                "RIPAPebbleAdvScheduler could not compact the unlabeled target set"
+            )
+
+        raise RuntimeError("RIPAPebbleAdvScheduler exceeded unlabeled compaction rounds")
+
+    def _best_unlabeled_compaction_move(
+        self,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        occupied = set(occ)
+        empty_targets = sorted(
+            target_sites - occupied,
+            key=lambda site: (-depths[site], site),
+        )
+
+        for target in empty_targets:
+            move = self._best_outside_to_target_move(target, target_sites, occ)
+            if move is not None:
+                return move
+
+            move = self._best_inward_target_slide(target, target_sites, depths, occ)
+            if move is not None:
+                return move
+
+        return None
+
+    def _best_outside_to_target_move(
+        self,
+        target: Site,
+        target_sites: set[Site],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        best: tuple[float, int, list[Site]] | None = None
+        for site, atom_id in occ.items():
+            if site in target_sites:
+                continue
+            path = self._shortest_path(atom_id, site, target, occ)
+            if path is None:
+                continue
+            key = (self._path_cost(path), atom_id, path)
+            if best is None or key[:2] < best[:2]:
+                best = key
+
+        if best is None:
+            return None
+        _, atom_id, path = best
+        return atom_id, path
+
+    def _best_inward_target_slide(
+        self,
+        target: Site,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        target_depth = depths[target]
+        best: tuple[int, float, int, list[Site]] | None = None
+        for site, atom_id in occ.items():
+            if site not in target_sites:
+                continue
+            source_depth = depths[site]
+            if source_depth >= target_depth:
+                continue
+            path = self._shortest_path(
+                atom_id,
+                site,
+                target,
+                occ,
+                allowed_sites=target_sites,
+            )
+            if path is None:
+                continue
+            key = (source_depth, self._path_cost(path), atom_id, path)
+            if best is None or key[:3] < best[:3]:
+                best = key
+
+        if best is None:
+            return None
+        _, _, atom_id, path = best
+        return atom_id, path
+
+    # ---- labeled staged routing -------------------------------------------
+
+    def _plan_labeled_target_set(self) -> None:
+        assignment = {
+            atom_id: tuple(site) for atom_id, site in enumerate(self.request.dst)
+        }
+        target_sites = set(assignment.values())
+        depths = self._target_depths(target_sites)
+
+        self._clear_wrong_labeled_targets(assignment, target_sites, depths)
+        self._fill_labeled_targets(assignment, target_sites, depths)
+
+    def _clear_wrong_labeled_targets(
+        self,
+        assignment: dict[int, Site],
         target_sites: set[Site],
         depths: dict[Site, int],
     ) -> None:
         while True:
             occ = self._final_occupancy()
-            occupied_targets = [
+            wrong_targets = [
                 (site, atom_id)
                 for site, atom_id in occ.items()
-                if site in target_sites
+                if site in target_sites and tuple(assignment[atom_id]) != site
             ]
-            if not occupied_targets:
+            if not wrong_targets:
                 return
 
             progress = False
-            occupied_targets.sort(key=lambda item: (depths[item[0]], item[0]))
-            for site, atom_id in occupied_targets:
-                path = self._buffer_path(atom_id, site, target_sites, occ)
+            wrong_targets.sort(key=lambda item: (depths[item[0]], item[0]))
+            for site, atom_id in wrong_targets:
+                own_target = tuple(assignment[atom_id])
+                path = None
+                if occ.get(own_target) is None:
+                    path = self._shortest_path(atom_id, site, own_target, occ)
+                if path is None:
+                    path = self._buffer_path(atom_id, site, target_sites, occ)
                 if path is None:
                     continue
+
                 self._append_path(
                     atom_id,
                     path,
-                    sequential=not self.parallel_staging,
+                    sequential=not self.async_staging,
                 )
                 progress = True
                 break
@@ -158,51 +299,59 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
                 if self._relieve_target_gate(target_sites, occ):
                     continue
                 raise RuntimeError(
-                    "RIPAPebbleAdvScheduler could not clear the target region"
+                    "RIPAPebbleAdvScheduler could not clear wrong labeled targets"
                 )
 
-    def _fill_target_region(
+    def _fill_labeled_targets(
         self,
+        assignment: dict[int, Site],
         target_sites: set[Site],
         depths: dict[Site, int],
     ) -> None:
+        target_to_atom = {target: atom_id for atom_id, target in assignment.items()}
+
         while True:
             occ = self._final_occupancy()
-            occupied = set(occ)
-            empty_targets = sorted(
-                target_sites - occupied,
-                key=lambda site: (-depths[site], site),
-            )
-            if not empty_targets:
-                return
+            site_by_atom = self.sequence.final_config().site_of_atom()
+            unfinished_targets = [
+                tuple(target)
+                for atom_id, target in assignment.items()
+                if site_by_atom.get(atom_id) != tuple(target)
+                and occ.get(tuple(target)) is None
+            ]
+            if not unfinished_targets:
+                if all(
+                    site_by_atom.get(atom_id) == target
+                    for atom_id, target in assignment.items()
+                ):
+                    return
+                self._clear_wrong_labeled_targets(assignment, target_sites, depths)
+                continue
 
-            best: tuple[float, int, Site, list[Site]] | None = None
-            for target in empty_targets:
-                for site, atom_id in occ.items():
-                    if site in target_sites:
-                        continue
-                    path = self._shortest_path(atom_id, site, target, occ)
-                    if path is None:
-                        continue
-                    score = self._path_cost(path)
-                    key = (score, atom_id, target, path)
-                    if best is None or key[:3] < best[:3]:
-                        best = key
+            progress = False
+            for target in sorted(
+                unfinished_targets,
+                key=lambda site: (-depths.get(site, 0), site),
+            ):
+                atom_id = target_to_atom[target]
+                current = site_by_atom[atom_id]
+                path = self._shortest_path(atom_id, current, target, occ)
+                if path is None:
+                    continue
 
-                if best is not None and best[2] == target:
-                    break
-
-            if best is None:
-                raise RuntimeError(
-                    "RIPAPebbleAdvScheduler could not fill the target region"
+                self._append_path(
+                    atom_id,
+                    path,
+                    sequential=not self.async_staging,
                 )
+                progress = True
+                break
 
-            _, atom_id, _, path = best
-            self._append_path(
-                atom_id,
-                path,
-                sequential=not self.parallel_staging,
-            )
+            if progress:
+                continue
+            if self._relieve_target_gate(target_sites, occ):
+                continue
+            raise RuntimeError("RIPAPebbleAdvScheduler could not fill labeled targets")
 
     # ---- assigned route fallback ------------------------------------------
 
@@ -241,8 +390,16 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         start: Site,
         goal: Site,
         occ: dict[Site, int],
+        *,
+        allowed_sites: set[Site] | None = None,
     ) -> list[Site] | None:
-        return self._shortest_path_to_any(atom_id, start, {goal}, occ)
+        return self._shortest_path_to_any(
+            atom_id,
+            start,
+            {goal},
+            occ,
+            allowed_sites=allowed_sites,
+        )
 
     def _shortest_path_to_any(
         self,
@@ -250,9 +407,18 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         start: Site,
         goals: Iterable[Site],
         occ: dict[Site, int],
+        *,
+        allowed_sites: set[Site] | None = None,
     ) -> list[Site] | None:
         start = tuple(start)
+        allowed = (
+            {tuple(site) for site in allowed_sites} | {start}
+            if allowed_sites is not None
+            else None
+        )
         goal_set = {tuple(goal) for goal in goals}
+        if allowed is not None:
+            goal_set = {goal for goal in goal_set if goal in allowed}
         goal_set = {
             goal
             for goal in goal_set
@@ -276,7 +442,12 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             if site in goal_set:
                 return self._reconstruct_path(prev, site)
 
-            for neighbor in self._visible_neighbors(atom_id, site, occ):
+            for neighbor in self._visible_neighbors(
+                atom_id,
+                site,
+                occ,
+                allowed_sites=allowed,
+            ):
                 new_cost = cost + self._leg_cost(site, neighbor)
                 if new_cost + 1e-15 < dist.get(neighbor, math.inf):
                     dist[neighbor] = new_cost
@@ -290,6 +461,8 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         atom_id: int,
         site: Site,
         occ: dict[Site, int],
+        *,
+        allowed_sites: set[Site] | None = None,
     ) -> Iterable[Site]:
         N = self.request.grid.N
         i, j = site
@@ -297,6 +470,8 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             ni, nj = i + di, j + dj
             while 0 <= ni < N and 0 <= nj < N:
                 nxt = (ni, nj)
+                if allowed_sites is not None and nxt not in allowed_sites:
+                    break
                 owner = occ.get(nxt)
                 if owner is not None and owner != atom_id:
                     break
@@ -313,14 +488,14 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         return path
 
     def _path_cost(self, path: list[Site]) -> float:
-        return sum(
-            self._leg_cost(start, end)
-            for start, end in zip(path, path[1:])
-        )
+        return sum(self._leg_cost(start, end) for start, end in zip(path, path[1:]))
 
     def _leg_cost(self, start: Site, end: Site) -> float:
         distance = self._manhattan(start, end)
-        return self._move_duration(distance) + self.handoff_weight * self._unit_leg_duration()
+        return (
+            self._move_duration(distance)
+            + self.handoff_weight * self._unit_leg_duration()
+        )
 
     # ---- movement commit ---------------------------------------------------
 
@@ -411,7 +586,9 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             boundary = {
                 site
                 for site in remaining
-                if any(neighbor not in remaining for neighbor in self._grid_neighbors(site))
+                if any(
+                    neighbor not in remaining for neighbor in self._grid_neighbors(site)
+                )
             }
             if not boundary:
                 boundary = set(remaining)
@@ -493,7 +670,7 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             self._append_path(
                 atom_id,
                 path,
-                sequential=not self.parallel_staging,
+                sequential=not self.async_staging,
             )
             return True
         return False
@@ -580,7 +757,9 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             return best_cost, best_order
 
         _, order = solve(0, 0)
-        return {atom_id: targets[target_idx] for atom_id, target_idx in enumerate(order)}
+        return {
+            atom_id: targets[target_idx] for atom_id, target_idx in enumerate(order)
+        }
 
     @staticmethod
     def _greedy_min_cost_assignment(
