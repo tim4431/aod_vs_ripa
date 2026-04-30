@@ -12,3 +12,10 @@
 - I want an animation render. On the left, show atom plane. On the right, show RIPA/AOD frequency tones, and their time trajectories. See [](vis_example.png).
 - The animation render generate pictures and save as gif. Use multiprocessing to accelerate gif creating speed. Have a switch to optimize for speed or performance.
 - Before the re-arrangement start, and after the re-arrangment ends, stop for 1 second in gif for better animation.
+
+
+## How to check visualization
+- Plot at t=0, when all atoms show their planned trajectories
+- Plot at t=final, to see if atoms are in the correct final config
+- Generate animation gif to let humans validate if the movement is correct.
+- Use suffix to distinguish these figures. Use your multimodal abilities to read these figures and check.

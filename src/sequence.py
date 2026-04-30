@@ -35,7 +35,7 @@ class Sequence:
     grid: Grid
     initial: AtomConfig
     inter_step_gap: float = 0.0
-    # Forwarded to the underlying AtomEnsemble's collision sampler.
+    # Forwarded to the underlying AtomEnsemble's collision validator.
     collision_dt: float = 1e-6
     steps: list[Step] = field(default_factory=list)
     _ensemble: Optional[AtomEnsemble] = None
@@ -106,12 +106,12 @@ class Sequence:
                 merged.setdefault(aid, []).extend(segs)
         return merged
 
-    # ---- re-validation at a different sampling rate ------------------------
+    # ---- re-validation at a different collision tolerance ------------------
 
     def validate(self, dt: float = 1e-6) -> CollisionReport:
-        """Replay the sequence in a fresh ensemble at sampling spacing `dt`,
-        returning the first failing CollisionReport or `ok=True`. Useful
-        for re-checking with a finer dt than the one used at append time.
+        """Replay the sequence in a fresh ensemble with collision scale `dt`,
+        returning the first failing CollisionReport or `ok=True`. Useful for
+        re-checking with a tighter validator tolerance than append time.
         """
         fresh = AtomEnsemble.from_config(self.grid, self.initial)
         fresh.collision_dt = dt

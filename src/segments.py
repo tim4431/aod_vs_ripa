@@ -19,7 +19,9 @@ from typing import Callable, Literal, Optional
 
 # Local-time function: t in [0, duration] -> (i, j) in grid units (float).
 TrajFn = Callable[[float], tuple[float, float]]
+Profile = Callable[[float], float]
 Channel = Literal["row", "col", "aod"]  # 'aod' = AOD synchronous; row/col = RIPA EOM
+Axis = Literal["x", "y"]  # x == i-coordinate, y == j-coordinate
 
 
 @dataclass
@@ -30,10 +32,47 @@ class Segment:
     end_pos: tuple[int, int]  # integer site at t = end_time
     fn: TrajFn  # local-time -> (i, j) float
     channel: Optional[Channel] = None  # which addressing channel drove the move
+    profile: Optional[Profile] = None  # local-time -> path fraction, when known
 
     @property
     def end_time(self) -> float:
         return self.start_time + self.duration
+
+    @property
+    def delta(self) -> tuple[int, int]:
+        return self.end_pos[0] - self.start_pos[0], self.end_pos[1] - self.start_pos[1]
+
+    @property
+    def is_hold(self) -> bool:
+        return self.start_pos == self.end_pos
+
+    @property
+    def motion_axis(self) -> Axis | None:
+        """Physical axis for single-axis motion.
+
+        Code coordinates are `(i, j)`, where `i` is horizontal (`x`) and
+        `j` is vertical (`y`). Holds and diagonal/AOD moves return `None`.
+        """
+        di, dj = self.delta
+        if di != 0 and dj == 0:
+            return "x"
+        if dj != 0 and di == 0:
+            return "y"
+        return None
+
+    @property
+    def direction(self) -> int:
+        """Direction along `motion_axis`: -1, 0, or +1."""
+        axis = self.motion_axis
+        if axis == "x":
+            return (self.end_pos[0] > self.start_pos[0]) - (
+                self.end_pos[0] < self.start_pos[0]
+            )
+        if axis == "y":
+            return (self.end_pos[1] > self.start_pos[1]) - (
+                self.end_pos[1] < self.start_pos[1]
+            )
+        return 0
 
     def position_at(self, t_global: float) -> tuple[float, float]:
         """Sample at a global time. Outside the segment, returns the endpoint."""
@@ -67,8 +106,6 @@ def bang_bang_duration(distance: float, accel: float) -> float:
 # Normalized temporal profile: t_local in [0, duration] -> u in [0, 1] giving
 # the fraction of the straight-line path from start to end that has been
 # covered. profile(0) should be ~0 and profile(duration) should be ~1.
-Profile = Callable[[float], float]
-
 
 def make_segment(
     start: tuple[int, int],
@@ -106,6 +143,7 @@ def make_segment(
         end_pos=e_int,
         fn=fn,
         channel=channel,
+        profile=profile,
     )
 
 

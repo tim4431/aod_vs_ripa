@@ -17,6 +17,7 @@ Conventions:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -24,13 +25,30 @@ import numpy as np
 from .atom_config import AtomConfig, Grid
 from .segments import Segment
 
+_TIME_TOL = 1e-12
+
+
+@dataclass(frozen=True)
+class _TrajectoryPiece:
+    start_time: float
+    end_time: float
+    segment: Segment | None = None
+    position: tuple[float, float] | None = None
+
+    def position_at(self, t: float) -> tuple[float, float]:
+        if self.segment is not None:
+            return self.segment.position_at(t)
+        assert self.position is not None
+        return self.position
+
+
 # --- collision report and error --------------------------------------------
 
 
 @dataclass
 class CollisionReport:
     ok: bool
-    # (candidate_atom_id, other_atom_id, t) at the closest sample.
+    # (candidate_atom_id, other_atom_id, t) at the closest detected approach.
     worst_pair: tuple[int, int, float] | None = None
     worst_distance: float = float("inf")  # in physical um
 
@@ -124,7 +142,7 @@ class AtomEnsemble:
 
     grid: Grid
     atomtrajs: list[AtomTrajectory] = field(default_factory=list)
-    # Sample spacing (seconds) used by the collision validator.
+    # Time tolerance scale used by the collision validator's profile search.
     collision_dt: float = 1e-6
     _id_index: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
@@ -187,47 +205,371 @@ class AtomEnsemble:
     # ---- collision check (non-mutating) ------------------------------------
 
     def _check_collision(self, atom_id: int, segment: Segment) -> CollisionReport:
-        """Sample the candidate `segment` against every *other* atom's
-        existing trajectory, and report the worst pairwise distance.
+        """Check the candidate `segment` against every other atom's timeline,
+        and report the worst pairwise distance.
 
         Older segments don't need to be re-checked against each other —
         they were validated when each was appended. So the work per
-        appended segment is O(M) sample-passes (one per other atom),
+        appended segment is O(M) timeline passes (one per other atom),
         not O(M^2). The candidate is read directly from `segment`; the
-        ensemble is not mutated.
+        ensemble is not mutated. Axis-separated path pairs are rejected
+        geometrically before checking actual timing profiles.
         """
-        if segment.duration <= 0:
-            return CollisionReport(ok=True)
+        return self._check_candidate_collisions({int(atom_id): segment})
 
-        # dt-spaced samples over the candidate's window, plus boundaries
-        # (already at the endpoints of np.linspace).
-        n = max(2, int(np.ceil(segment.duration / self.collision_dt)) + 1)
-        ts = np.linspace(segment.start_time, segment.end_time, n)
-
-        # Convert grid-unit positions to physical um for the rc check.
-        cand_xy = self.grid.ij_to_xy(
-            np.array([segment.position_at(float(t)) for t in ts])
-        )
-
-        rc = self.grid.rc
-        worst_d = float("inf")
+    def _check_candidate_collisions(
+        self, candidates: dict[int, Segment]
+    ) -> CollisionReport:
+        rc_grid = self.grid.rc / self.grid.d
+        worst_grid = float("inf")
         worst_pair = None
-        for other in self.atomtrajs:
-            if other.atom_id == atom_id:
-                continue
-            other_xy = self.grid.ij_to_xy(
-                np.array([other.position_at(float(t)) for t in ts])
-            )
-            d = np.linalg.norm(cand_xy - other_xy, axis=1)
-            ti = int(np.argmin(d))
-            d_min = float(d[ti])
-            if d_min < worst_d:
-                worst_d = d_min
-                worst_pair = (int(atom_id), int(other.atom_id), float(ts[ti]))
 
+        for atom_id, segment in candidates.items():
+            if segment.duration <= 0:
+                continue
+
+            for other in self.atomtrajs:
+                other_id = int(other.atom_id)
+                if other_id == atom_id:
+                    continue
+
+                d_grid, t = self._min_distance_to_atom(
+                    segment,
+                    other,
+                    candidates.get(other_id),
+                    rc_grid,
+                )
+                if d_grid < worst_grid:
+                    worst_grid = d_grid
+                    worst_pair = (int(atom_id), other_id, float(t))
+
+        worst_um = worst_grid * self.grid.d
         return CollisionReport(
-            ok=worst_d >= rc, worst_pair=worst_pair, worst_distance=worst_d
+            ok=worst_um + 1e-12 >= self.grid.rc,
+            worst_pair=worst_pair,
+            worst_distance=worst_um,
         )
+
+    def _min_distance_to_atom(
+        self,
+        segment: Segment,
+        other: AtomTrajectory,
+        other_candidate: Segment | None,
+        rc_grid: float,
+    ) -> tuple[float, float]:
+        if segment.duration <= 0:
+            return float("inf"), segment.start_time
+
+        best_grid = float("inf")
+        best_t = segment.start_time
+        for piece in self._iter_atom_pieces(
+            other, segment.start_time, segment.end_time, other_candidate
+        ):
+            t0 = max(segment.start_time, piece.start_time)
+            t1 = min(segment.end_time, piece.end_time)
+            if t1 < t0 - _TIME_TOL:
+                continue
+
+            d_grid, t = self._distance_to_piece(segment, piece, t0, t1, rc_grid)
+            if d_grid < best_grid:
+                best_grid = d_grid
+                best_t = t
+
+        return best_grid, best_t
+
+    def _check_batch_collision(self, candidates: dict[int, Segment]) -> CollisionReport:
+        """Check simultaneous candidate segments as one mutation."""
+        return self._check_candidate_collisions(candidates)
+
+    def _iter_atom_pieces(
+        self,
+        atomtraj: AtomTrajectory,
+        start_time: float,
+        end_time: float,
+        candidate: Segment | None = None,
+    ):
+        if candidate is None:
+            yield from self._iter_existing_pieces(atomtraj, start_time, end_time)
+            return
+
+        before_end = min(end_time, candidate.start_time)
+        if start_time < before_end - _TIME_TOL:
+            yield from self._iter_existing_pieces(atomtraj, start_time, before_end)
+
+        move_start = max(start_time, candidate.start_time)
+        move_end = min(end_time, candidate.end_time)
+        if candidate.duration > 0 and move_start < move_end - _TIME_TOL:
+            yield _TrajectoryPiece(move_start, move_end, segment=candidate)
+
+        rest_start = max(start_time, candidate.end_time)
+        if rest_start < end_time - _TIME_TOL:
+            yield _TrajectoryPiece(
+                rest_start,
+                end_time,
+                position=(float(candidate.end_pos[0]), float(candidate.end_pos[1])),
+            )
+
+    @staticmethod
+    def _iter_existing_pieces(
+        atomtraj: AtomTrajectory, start_time: float, end_time: float
+    ):
+        cursor = start_time
+        rest_pos = atomtraj.initial_pos
+
+        for seg in atomtraj.segments:
+            if seg.end_time <= start_time + _TIME_TOL:
+                rest_pos = seg.end_pos
+                continue
+            if seg.start_time >= end_time - _TIME_TOL:
+                break
+
+            rest_end = min(seg.start_time, end_time)
+            if cursor < rest_end - _TIME_TOL:
+                yield _TrajectoryPiece(
+                    cursor,
+                    rest_end,
+                    position=(float(rest_pos[0]), float(rest_pos[1])),
+                )
+                cursor = rest_end
+
+            move_start = max(seg.start_time, cursor, start_time)
+            move_end = min(seg.end_time, end_time)
+            if move_start < move_end - _TIME_TOL:
+                yield _TrajectoryPiece(move_start, move_end, segment=seg)
+                cursor = move_end
+
+            if seg.end_time <= cursor + _TIME_TOL:
+                rest_pos = seg.end_pos
+            else:
+                return
+
+        if cursor < end_time - _TIME_TOL:
+            yield _TrajectoryPiece(
+                cursor,
+                end_time,
+                position=(float(rest_pos[0]), float(rest_pos[1])),
+            )
+
+    def _distance_to_piece(
+        self,
+        segment: Segment,
+        piece: _TrajectoryPiece,
+        t0: float,
+        t1: float,
+        rc_grid: float,
+    ) -> tuple[float, float]:
+        if t1 <= t0 + _TIME_TOL:
+            d = self._distance_grid(segment.position_at(t0), piece.position_at(t0))
+            return d, t0
+
+        if piece.segment is None:
+            assert piece.position is not None
+            return self._moving_point_distance(segment, t0, t1, piece.position)
+
+        lower = self._bbox_distance_grid(
+            self._segment_bbox(segment, t0, t1),
+            self._segment_bbox(piece.segment, t0, t1),
+        )
+        if lower >= rc_grid:
+            return lower, t0
+
+        return self._moving_segment_distance(segment, piece.segment, t0, t1)
+
+    def _moving_point_distance(
+        self,
+        segment: Segment,
+        t0: float,
+        t1: float,
+        point: tuple[float, float],
+    ) -> tuple[float, float]:
+        p0 = segment.position_at(t0)
+        p1 = segment.position_at(t1)
+        vx = p1[0] - p0[0]
+        vy = p1[1] - p0[1]
+        length2 = vx * vx + vy * vy
+        if length2 <= 0:
+            return self._distance_grid(p0, point), t0
+
+        u = ((point[0] - p0[0]) * vx + (point[1] - p0[1]) * vy) / length2
+        u = max(0.0, min(1.0, u))
+        closest = (p0[0] + u * vx, p0[1] + u * vy)
+        t = self._time_for_segment_point(segment, closest, t0, t1, u)
+        return self._distance_grid(closest, point), t
+
+    def _moving_segment_distance(
+        self,
+        a: Segment,
+        b: Segment,
+        t0: float,
+        t1: float,
+    ) -> tuple[float, float]:
+        breakpoints = self._collision_breakpoints(a, b, t0, t1)
+        best_t = breakpoints[0]
+        best_d2 = self._distance2_at(a, b, best_t)
+
+        for t in breakpoints[1:]:
+            d2 = self._distance2_at(a, b, t)
+            if d2 < best_d2:
+                best_d2 = d2
+                best_t = t
+
+        for lo, hi in zip(breakpoints, breakpoints[1:]):
+            if hi <= lo + _TIME_TOL:
+                continue
+            t, d2 = self._golden_min_distance2(a, b, lo, hi)
+            if d2 < best_d2:
+                best_d2 = d2
+                best_t = t
+
+        return math.sqrt(best_d2), best_t
+
+    def _collision_breakpoints(
+        self, a: Segment, b: Segment, t0: float, t1: float
+    ) -> list[float]:
+        points = {float(t0), float(t1)}
+        for seg in (a, b):
+            for frac in (0.25, 0.5, 0.75):
+                t = seg.start_time + frac * seg.duration
+                if t0 < t < t1:
+                    points.add(float(t))
+            for t in (seg.start_time, seg.end_time):
+                if t0 < t < t1:
+                    points.add(float(t))
+
+        for t in self._path_crossing_times(a, b, t0, t1):
+            if t0 < t < t1:
+                points.add(float(t))
+
+        return sorted(points)
+
+    def _path_crossing_times(
+        self, a: Segment, b: Segment, t0: float, t1: float
+    ) -> list[float]:
+        if a.motion_axis == "x" and b.motion_axis == "y":
+            return [
+                self._time_for_axis_value(a, b.start_pos[0], 0, t0, t1),
+                self._time_for_axis_value(b, a.start_pos[1], 1, t0, t1),
+            ]
+        if a.motion_axis == "y" and b.motion_axis == "x":
+            return [
+                self._time_for_axis_value(a, b.start_pos[1], 1, t0, t1),
+                self._time_for_axis_value(b, a.start_pos[0], 0, t0, t1),
+            ]
+        return []
+
+    def _golden_min_distance2(
+        self, a: Segment, b: Segment, lo: float, hi: float
+    ) -> tuple[float, float]:
+        phi = (math.sqrt(5.0) - 1.0) / 2.0
+        x1 = hi - phi * (hi - lo)
+        x2 = lo + phi * (hi - lo)
+        f1 = self._distance2_at(a, b, x1)
+        f2 = self._distance2_at(a, b, x2)
+        tol = max(_TIME_TOL, min(self.collision_dt * 1e-3, (hi - lo) * 1e-9))
+
+        for _ in range(64):
+            if hi - lo <= tol:
+                break
+            if f1 <= f2:
+                hi = x2
+                x2 = x1
+                f2 = f1
+                x1 = hi - phi * (hi - lo)
+                f1 = self._distance2_at(a, b, x1)
+            else:
+                lo = x1
+                x1 = x2
+                f1 = f2
+                x2 = lo + phi * (hi - lo)
+                f2 = self._distance2_at(a, b, x2)
+
+        candidates = [
+            (lo, self._distance2_at(a, b, lo)),
+            (hi, self._distance2_at(a, b, hi)),
+            (x1, f1),
+            (x2, f2),
+        ]
+        return min(candidates, key=lambda item: item[1])
+
+    @staticmethod
+    def _distance2_at(a: Segment, b: Segment, t: float) -> float:
+        pa = a.position_at(t)
+        pb = b.position_at(t)
+        dx = pa[0] - pb[0]
+        dy = pa[1] - pb[1]
+        return dx * dx + dy * dy
+
+    def _time_for_segment_point(
+        self,
+        segment: Segment,
+        point: tuple[float, float],
+        t0: float,
+        t1: float,
+        fallback_fraction: float,
+    ) -> float:
+        axis = segment.motion_axis
+        if axis == "x":
+            return self._time_for_axis_value(segment, point[0], 0, t0, t1)
+        if axis == "y":
+            return self._time_for_axis_value(segment, point[1], 1, t0, t1)
+        return t0 + fallback_fraction * (t1 - t0)
+
+    @staticmethod
+    def _time_for_axis_value(
+        segment: Segment,
+        value: float,
+        coord_index: int,
+        t0: float,
+        t1: float,
+    ) -> float:
+        p0 = segment.position_at(t0)[coord_index]
+        p1 = segment.position_at(t1)[coord_index]
+        lo_value = min(p0, p1)
+        hi_value = max(p0, p1)
+        if value < lo_value - 1e-12 or value > hi_value + 1e-12:
+            return t0 if abs(p0 - value) <= abs(p1 - value) else t1
+        if abs(p1 - p0) <= 1e-15:
+            return t0
+
+        lo = t0
+        hi = t1
+        increasing = p1 >= p0
+        for _ in range(64):
+            mid = (lo + hi) / 2.0
+            mid_value = segment.position_at(mid)[coord_index]
+            if (mid_value < value) == increasing:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2.0
+
+    @staticmethod
+    def _segment_bbox(
+        segment: Segment, t0: float, t1: float
+    ) -> tuple[float, float, float, float]:
+        p0 = segment.position_at(t0)
+        p1 = segment.position_at(t1)
+        return (
+            min(p0[0], p1[0]),
+            max(p0[0], p1[0]),
+            min(p0[1], p1[1]),
+            max(p0[1], p1[1]),
+        )
+
+    @staticmethod
+    def _bbox_distance_grid(
+        a: tuple[float, float, float, float],
+        b: tuple[float, float, float, float],
+    ) -> float:
+        dx = max(b[0] - a[1], a[0] - b[1], 0.0)
+        dy = max(b[2] - a[3], a[2] - b[3], 0.0)
+        return math.hypot(dx, dy)
+
+    @staticmethod
+    def _distance_grid(
+        a: tuple[float, float], b: tuple[float, float]
+    ) -> float:
+        return math.hypot(a[0] - b[0], a[1] - b[1])
 
     def check_segment(self, atom_id: int, segment: Segment) -> CollisionReport:
         """Non-mutating: would `segment` collide if appended? Also
@@ -241,18 +583,36 @@ class AtomEnsemble:
         """Validate then commit a segment to the addressed atom.
 
         Order:
-          1. Per-atom continuity (cheap) — raises ValueError on failure,
-             so we never run the expensive pass on a malformed segment.
-          2. Cross-atom collision over the candidate's window — uses
-             `collision_dt` for sampling. Raises `CollisionError` on
-             failure; the ensemble is unchanged in that case.
+          1. Per-atom continuity (cheap) raises ValueError on failure,
+             so we never run collision checks on a malformed segment.
+          2. Cross-atom collision over the candidate's window raises
+             `CollisionError` on failure; the ensemble is unchanged.
           3. Commit to `AtomTrajectory.segments`.
-
-        Pass `check_collisions=False` to skip step 2 (e.g. unit tests
-        that intentionally construct overlapping motion).
         """
         atomtraj = self.atomtraj_by_id(atom_id)
         rep = self.check_segment(atom_id, segment)
         if not rep.ok:
             raise CollisionError(rep)
         atomtraj.segments.append(segment)
+
+    def append_segments_batch(self, segments: list[tuple[int, Segment]]) -> None:
+        """Validate then commit multiple same-cycle segments together."""
+        if not segments:
+            return
+
+        candidates: dict[int, Segment] = {}
+        for atom_id, segment in segments:
+            atom_id = int(atom_id)
+            if atom_id in candidates:
+                raise ValueError(f"duplicate candidate segment for atom {atom_id}")
+            candidates[atom_id] = segment
+
+        for atom_id, segment in candidates.items():
+            self.atomtraj_by_id(atom_id)._check_continuity(segment)
+
+        rep = self._check_batch_collision(candidates)
+        if not rep.ok:
+            raise CollisionError(rep)
+
+        for atom_id, segment in segments:
+            self.atomtraj_by_id(atom_id).segments.append(segment)
