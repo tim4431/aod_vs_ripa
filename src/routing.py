@@ -25,12 +25,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Optional, Sequence
-
+import random
 import numpy as np
 
 from .atom_config import AtomConfig, Grid
 
 Site = tuple[int, int]
+
+
+def stochastically_loaded_sites(N: int, atom_count: int, seed: int) -> list[Site]:
+    """Return a list of sites with atoms placed stochastically."""
+    if not 0 <= atom_count <= N * N:
+        raise ValueError("atom_count must be between 0 and N*N")
+
+    rng = random.Random(seed)
+    sites = [(i, j) for i in range(N) for j in range(N)]
+    rng.shuffle(sites)
+    return sorted(sites[:atom_count])
+
+
+def centered_square_targets(N: int, side: int) -> list[Site]:
+    """Centered side x side target square."""
+    if not 0 < side <= N:
+        raise ValueError("target side must be between 1 and N")
+
+    start = (N - side) // 2
+    return [
+        (i, j) for i in range(start, start + side) for j in range(start, start + side)
+    ]
 
 
 @dataclass

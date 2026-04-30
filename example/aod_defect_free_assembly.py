@@ -11,7 +11,7 @@ Outputs are written to `render/`:
 
 from __future__ import annotations
 
-import random
+
 import sys
 from pathlib import Path
 
@@ -20,10 +20,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.atom_config import Grid
-from src.routing import RoutingRequest, Site
+from src.routing import *
 from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
 from src.visualization import render_check_outputs
-
 
 N = 10
 TARGET_SIDE = 7
@@ -36,35 +35,12 @@ OUT_DIR = ROOT / "render"
 PREFIX = "aod_defect_free_assembly"
 
 
-def random_loaded_sites(N: int, atom_count: int, seed: int) -> list[Site]:
-    if not 0 <= atom_count <= N * N:
-        raise ValueError("atom_count must be between 0 and N*N")
-
-    rng = random.Random(seed)
-    sites = [(i, j) for i in range(N) for j in range(N)]
-    rng.shuffle(sites)
-    return sorted(sites[:atom_count])
-
-
-def centered_square_targets(N: int, side: int) -> list[Site]:
-    """Centered side x side target square."""
-    if not 0 < side <= N:
-        raise ValueError("target side must be between 1 and N")
-
-    start = (N - side) // 2
-    return [
-        (i, j)
-        for i in range(start, start + side)
-        for j in range(start, start + side)
-    ]
-
-
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
     target_atom_count = TARGET_SIDE * TARGET_SIDE
-    src = random_loaded_sites(N, target_atom_count, SEED)
+    src = stochastically_loaded_sites(N, target_atom_count, SEED)
     dst = centered_square_targets(N, TARGET_SIDE)
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=False)
 

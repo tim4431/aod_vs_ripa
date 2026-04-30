@@ -91,7 +91,8 @@ _QUALITY: dict[RenderQuality, _Style] = {
 
 def draw_grid_dots(ax: Any, grid: Grid) -> None:
     """Draw the gray underlying lattice dot at every grid site."""
-    xy = grid.ij_to_xy(_all_grid_sites(grid.N))
+    ii, jj = np.meshgrid(np.arange(grid.N), np.arange(grid.N), indexing="ij")
+    xy = grid.ij_to_xy(np.column_stack([ii.ravel(), jj.ravel()]).astype(float))
     ax.scatter(
         xy[:, 0], xy[:, 1], s=TRAP_SIZE, c="#9a9a9a",
         alpha=0.45, linewidths=0, zorder=1,
@@ -113,7 +114,8 @@ def draw_static_traps(ax: Any, grid: Grid, sites: Iterable[Site]) -> None:
 
 def draw_grid_frame(ax: Any, grid: Grid) -> None:
     """Draw the dashed grey rectangle that frames the grid extent and set axis limits."""
-    lo, hi = _site_extent_um(grid)
+    lo = (0.0 - grid.center) * grid.d
+    hi = ((grid.N - 1.0) - grid.center) * grid.d
     b0 = lo - grid.d / 2.0
     b1 = hi + grid.d / 2.0
     width = b1 - b0
@@ -131,7 +133,7 @@ def draw_grid_frame(ax: Any, grid: Grid) -> None:
 
 
 def draw_aod_traps(ax: Any, sequence: Any, t: float) -> None:
-    """Draw red square markers at every active AOD trap (no-op when not a Sequence)."""
+    """Draw red square markers at every active AOD trap *not* currently holding an atom."""
     ensemble = getattr(sequence, "ensemble", None)
     steps = getattr(sequence, "steps", None)
     if ensemble is None or not steps:
@@ -139,6 +141,13 @@ def draw_aod_traps(ax: Any, sequence: Any, t: float) -> None:
     xy = _active_aod_traps_xy(steps, ensemble, t)
     if not len(xy):
         return
+    atom_xy = ensemble.grid.ij_to_xy(ensemble.positions_at(t))
+    if len(atom_xy):
+        tol = ensemble.grid.d * 1e-3
+        dists = np.linalg.norm(xy[:, None, :] - atom_xy[None, :, :], axis=2)
+        xy = xy[~(dists < tol).any(axis=1)]
+        if not len(xy):
+            return
     ax.scatter(
         xy[:, 0], xy[:, 1], s=TRAP_SIZE * 5.0, marker="s",
         facecolors="none", edgecolors="#d62728",
@@ -282,7 +291,14 @@ def draw_current_tones(
     ax.set_ylim(0.0, 1.2)
     ax.set_xlabel(FREQ_LABEL)
     ax.set_ylabel("amplitude")
-    ax.set_title(_tone_panel_title(channel, _tone_hardware_name(ensemble)))
+    hardware = _tone_hardware_name(ensemble)
+    axis = "x" if channel == "row" else "y"
+    panel_title = (
+        f"{channel} tone (controls {axis})"
+        if hardware == "tone"
+        else f"{channel} {hardware} (controls {axis})"
+    )
+    ax.set_title(panel_title)
     ax.grid(True, color="#e5e5e5", linewidth=0.6)
 
 
@@ -673,19 +689,6 @@ def _darken_color(color: Any) -> Any:
 # --- geometry / segment helpers --------------------------------------------
 
 
-def _all_grid_sites(N: int) -> np.ndarray:
-    """Return every (i, j) site of an N x N grid as a flat (N*N, 2) float array."""
-    ii, jj = np.meshgrid(np.arange(N), np.arange(N), indexing="ij")
-    return np.column_stack([ii.ravel(), jj.ravel()]).astype(float)
-
-
-def _site_extent_um(grid: Grid) -> tuple[float, float]:
-    """Return (lo, hi) micrometer coordinates of the grid's extreme sites."""
-    lo = (0.0 - grid.center) * grid.d
-    hi = ((grid.N - 1.0) - grid.center) * grid.d
-    return float(lo), float(hi)
-
-
 def _active_segment(
     atom: AtomTrajectory, t: float, *, tol: float = 1e-12,
 ) -> Segment | None:
@@ -958,14 +961,6 @@ def _next_tone_trajectory_by_atom(
         if float(traj["end_time"]) > t + 1e-15:
             selected[idx] = traj
     return selected
-
-
-def _tone_panel_title(channel: ToneChannel, hardware: ToneHardware) -> str:
-    """Compose the per-panel title that names the channel and the controlled axis."""
-    axis = "x" if channel == "row" else "y"
-    if hardware == "tone":
-        return f"{channel} tone (controls {axis})"
-    return f"{channel} {hardware} (controls {axis})"
 
 
 # --- assorted small helpers ------------------------------------------------
