@@ -133,7 +133,6 @@ def main() -> None:
         addressed_style="edge",
         title_prefix=f"AOD defect-free assembly - target {square_side}x{square_side}",
         gif_fps=6,
-        gif_frames=100,
         gif_hold_seconds=1.5,
         optimize="speed",
         use_multiprocessing=False,

@@ -59,7 +59,6 @@ def maybe_render(prefix: str, sequence: Sequence, request: RoutingRequest, rende
         addressed_style="edge",
         title_prefix=prefix,
         gif_fps=8,
-        gif_frames=50,
         gif_hold_seconds=0.8,
         optimize="speed",
         use_multiprocessing=False,

@@ -109,6 +109,9 @@ class RIPAPebbleScheduler(AsyncScheduler):
         ]
         if n <= self.max_exact_unlabeled_atoms:
             return self._exact_min_cost_assignment(costs, targets)
+        linear_assignment = self._linear_sum_assignment(costs, targets)
+        if linear_assignment is not None:
+            return linear_assignment
         return self._greedy_min_cost_assignment(costs, targets)
 
     def _plan(self) -> None:
@@ -605,6 +608,22 @@ class RIPAPebbleScheduler(AsyncScheduler):
             assignment[atom_id] = targets[target_idx]
         return assignment
 
+    @staticmethod
+    def _linear_sum_assignment(
+        costs: list[list[float]],
+        targets: list[Site],
+    ) -> dict[int, Site] | None:
+        """Use SciPy's Hungarian/Jonker-Volgenant solver when available."""
+        try:
+            from scipy.optimize import linear_sum_assignment
+        except Exception:
+            return None
+
+        row_ind, col_ind = linear_sum_assignment(costs)
+        return {
+            int(atom_id): targets[int(target_idx)]
+            for atom_id, target_idx in zip(row_ind, col_ind)
+        }
+
 
 RIPAPebbleAsyncScheduler = RIPAPebbleScheduler
-

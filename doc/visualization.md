@@ -11,6 +11,7 @@
 - The visualizer for showing atoms, eom tones, should all be modularized (pass in a ax params, just plot on ax).
 - I want an animation render. On the left, show atom plane. On the right, show RIPA/AOD frequency tones, and their time trajectories. See [](vis_example.png).
 - The animation render generate pictures and save as gif. Use multiprocessing to accelerate gif creating speed. Have a switch to optimize for speed or performance.
+- GIF moving-frame count is proportional to the total rearrangement time by default, using one rendered frame every `frame_dt` seconds. Pass an explicit `n_frames` only when a fixed sample count is wanted.
 - Before the re-arrangement start, and after the re-arrangment ends, stop for 1 second in gif for better animation.
 
 

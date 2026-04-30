@@ -259,7 +259,8 @@ def render_animation(
     output_path: str | Path,
     *,
     fps: int = 20,
-    n_frames: int = 120,
+    n_frames: int | None = None,
+    frame_dt: float = 10e-6,
     frame_times: Iterable[float] | None = None,
     hold_seconds: float = 1.0,
     optimize: OptimizeMode = "speed",
@@ -281,9 +282,11 @@ def render_animation(
 ) -> Path:
     """Render a PNG frame sequence and combine it into a GIF.
 
-    `n_frames` controls how many samples are taken across the physical
-    rearrangement interval. The GIF playback speed is controlled by `fps`;
-    the physics timeline is therefore visualized, not played in real time.
+    By default, frame count is proportional to physical rearrangement time:
+    one moving frame every `frame_dt` seconds. Pass `n_frames` for a fixed
+    sample count, or `frame_times` for an explicit schedule. GIF playback
+    speed is controlled by `fps`; the physics timeline is visualized, not
+    played in real time.
 
     On platforms where process spawning is unavailable from the caller's
     context, rendering falls back to sequential frame generation.
@@ -291,8 +294,10 @@ def render_animation(
 
     if fps <= 0:
         raise ValueError("fps must be positive")
-    if n_frames <= 0:
+    if n_frames is not None and n_frames <= 0:
         raise ValueError("n_frames must be positive")
+    if frame_dt <= 0:
+        raise ValueError("frame_dt must be positive")
 
     ensemble = _as_ensemble(timeline)
     mode = _normalize_optimize(optimize)
@@ -310,7 +315,12 @@ def render_animation(
         if total <= 0:
             moving_times = np.array([0.0], dtype=float)
         else:
-            moving_times = np.linspace(0.0, total, int(n_frames), dtype=float)
+            frame_count = (
+                int(n_frames)
+                if n_frames is not None
+                else int(math.ceil(total / frame_dt)) + 1
+            )
+            moving_times = np.linspace(0.0, total, max(2, frame_count), dtype=float)
     else:
         moving_times = np.asarray(list(frame_times), dtype=float)
         if moving_times.size == 0:
@@ -393,7 +403,8 @@ def render_check_outputs(
     *,
     render_gif: bool = True,
     gif_fps: int = 8,
-    gif_frames: int = 80,
+    gif_frames: int | None = None,
+    gif_frame_dt: float = 10e-6,
     gif_hold_seconds: float = 1.0,
     title_prefix: str | None = None,
     **visual_kwargs: Any,
@@ -450,6 +461,7 @@ def render_check_outputs(
             paths["gif"],
             fps=gif_fps,
             n_frames=gif_frames,
+            frame_dt=gif_frame_dt,
             hold_seconds=gif_hold_seconds,
             **animation_kwargs,
         )
