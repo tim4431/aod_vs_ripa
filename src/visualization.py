@@ -17,7 +17,9 @@ FSR2 = FSR1 / N, the RIPA spectrometer mapping reduces to:
 from __future__ import annotations
 
 import math
+import os
 import tempfile
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping
@@ -554,6 +556,7 @@ def render_animation(
     show_routing_on_start: bool = True,
     title: str | None = None,
     show_progress: bool = True,
+    n_workers: int | None = None,
 ) -> Path:
     """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into a GIF.
 
@@ -562,6 +565,10 @@ def render_animation(
         e.g. `time_dilation=1e4` plays a 100 us run as a 1 s GIF.
       - `fps`: GIF playback frame rate.
     The physics-time step per frame is `1 / (time_dilation * fps)`.
+
+    `n_workers` controls per-frame rendering parallelism: `None` auto-picks
+    `os.cpu_count()`, `1` forces the serial path, and any other value is
+    used as the process-pool size. GIF stitching itself remains serial.
     """
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -614,23 +621,45 @@ def render_animation(
         show_atom_ids=show_atom_ids, title=title,
     )
 
+    items: list[tuple[int, float]] = [(k, float(t)) for k, t in enumerate(schedule)]
+    if n_workers is None:
+        n_workers_eff = min(os.cpu_count() or 1, len(items))
+    else:
+        n_workers_eff = max(1, int(n_workers))
+
     with tempfile.TemporaryDirectory(prefix="aod_vs_ripa_frames_") as tmp:
         tmp_path = Path(tmp)
-        frame_paths: list[Path] = []
-        for k, t in enumerate(
-            _progress_iter(
-                schedule, total=len(schedule), desc="render frames",
+        if n_workers_eff > 1 and len(items) > 1:
+            chunksize = max(1, len(items) // (n_workers_eff * 4))
+            with ProcessPoolExecutor(
+                max_workers=n_workers_eff,
+                initializer=_frame_worker_init,
+                initargs=(
+                    motion, draw_kwargs, dpi, hold_count,
+                    show_routing_on_start, str(tmp_path),
+                ),
+            ) as ex:
+                results = ex.map(_frame_worker_render, items, chunksize=chunksize)
+                frame_paths = [
+                    Path(p) for p in _progress_iter(
+                        results, total=len(items), desc="render frames",
+                        enabled=show_progress,
+                    )
+                ]
+        else:
+            frame_paths = []
+            for k, t in _progress_iter(
+                items, total=len(items), desc="render frames",
                 enabled=show_progress,
-            )
-        ):
-            show_routing = show_routing_on_start and k < hold_count
-            fig, _ = draw_frame(
-                motion, float(t), show_routing=show_routing, **draw_kwargs
-            )
-            path = tmp_path / f"frame_{k:05d}.png"
-            fig.savefig(path, dpi=dpi, facecolor="white")
-            plt.close(fig)
-            frame_paths.append(path)
+            ):
+                show_routing = show_routing_on_start and k < hold_count
+                fig, _ = draw_frame(
+                    motion, t, show_routing=show_routing, **draw_kwargs
+                )
+                path = tmp_path / f"frame_{k:05d}.png"
+                fig.savefig(path, dpi=dpi, facecolor="white")
+                plt.close(fig)
+                frame_paths.append(path)
         _save_gif_from_pngs(frame_paths, out, fps=fps, show_progress=show_progress)
     return out
 
@@ -1079,6 +1108,40 @@ def _format_time_us(t: float) -> str:
     return f"{value:.3f} us"
 
 
+_FRAME_WORKER: dict[str, Any] = {}
+
+
+def _frame_worker_init(
+    motion: Any,
+    draw_kwargs: dict[str, Any],
+    dpi: int,
+    hold_count: int,
+    show_routing_on_start: bool,
+    tmp_path_str: str,
+) -> None:
+    _FRAME_WORKER["motion"] = motion
+    _FRAME_WORKER["draw_kwargs"] = draw_kwargs
+    _FRAME_WORKER["dpi"] = dpi
+    _FRAME_WORKER["hold_count"] = hold_count
+    _FRAME_WORKER["show_routing_on_start"] = show_routing_on_start
+    _FRAME_WORKER["tmp_path"] = Path(tmp_path_str)
+
+
+def _frame_worker_render(item: tuple[int, float]) -> str:
+    k, t = item
+    show_routing = (
+        _FRAME_WORKER["show_routing_on_start"] and k < _FRAME_WORKER["hold_count"]
+    )
+    fig, _ = draw_frame(
+        _FRAME_WORKER["motion"], float(t),
+        show_routing=show_routing, **_FRAME_WORKER["draw_kwargs"],
+    )
+    path = _FRAME_WORKER["tmp_path"] / f"frame_{k:05d}.png"
+    fig.savefig(path, dpi=_FRAME_WORKER["dpi"], facecolor="white")
+    plt.close(fig)
+    return str(path)
+
+
 def _progress_iter(
     items: Iterable[Any], *, total: int, desc: str, enabled: bool,
 ) -> Iterable[Any]:
@@ -1096,17 +1159,36 @@ def _save_gif_from_pngs(
     fps: int,
     show_progress: bool,
 ) -> None:
-    """Stitch a sequence of PNG frames into an animated GIF via Pillow."""
+    """Stitch PNG frames into an animated GIF.
+
+    All frames are quantized to a single shared 128-color palette derived
+    from the middle frame (so it captures both the static layout and a
+    representative moving state). A shared palette plus `optimize=True`
+    lets Pillow store inter-frame diffs, which on mostly-static matplotlib
+    figures shrinks the GIF substantially without changing pixel resolution.
+    """
     if not frame_paths:
         raise ValueError("no frames to save")
     duration_ms = int(round(1000 / fps))
-    images = [
-        Image.open(p)
-        for p in _progress_iter(
-            frame_paths, total=len(frame_paths),
-            desc="load gif frames", enabled=show_progress,
+
+    with Image.open(frame_paths[len(frame_paths) // 2]) as ref:
+        palette_master = ref.convert("RGB").quantize(
+            colors=128,
+            method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.NONE,
         )
-    ]
+
+    images: list[Image.Image] = []
+    for path in _progress_iter(
+        frame_paths, total=len(frame_paths),
+        desc="load gif frames", enabled=show_progress,
+    ):
+        with Image.open(path) as raw:
+            images.append(
+                raw.convert("RGB").quantize(
+                    palette=palette_master, dither=Image.Dither.NONE,
+                )
+            )
     try:
         images[0].save(
             output_path,
@@ -1114,7 +1196,9 @@ def _save_gif_from_pngs(
             append_images=images[1:],
             duration=duration_ms,
             loop=0,
+            optimize=True,
         )
     finally:
         for image in images:
             image.close()
+        palette_master.close()

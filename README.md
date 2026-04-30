@@ -11,7 +11,7 @@ A direct comparison of two tools for moving neutral atoms in reconfigurable atom
 2. Develop our own schedulers for RIPA.
 3. Benchmark AOD vs RIPA across the routing problems below.
 
-
+![alt text](demo/defect_free_assembly_benchmark.gif)
 
 ## Status
 
