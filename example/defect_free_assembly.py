@@ -1,8 +1,8 @@
 """Demo and benchmark: unlabeled defect-free assembly with RIPA pebble routing.
 
-This mirrors the task shape from `aod_defect_free_assembly.py`: a stochastic
-loaded source is routed to the largest compact defect-free square possible, with
-leftover atoms parked nearby so source and target counts match.
+The source contains exactly 49 atoms randomly placed on the even storage sites
+of a 20x20 grid. Those atoms are routed to a centered 7x7 target square that
+also lies on the even storage sites.
 
 For the RIPA highway scheduler, the source/target sites are drawn from the
 storage subgrid. With `STORAGE_PERIOD = 2`, even rows/columns store atoms and
@@ -18,7 +18,6 @@ Outputs are written to `render/`:
 from __future__ import annotations
 
 import argparse
-import math
 import random
 import sys
 from pathlib import Path
@@ -34,10 +33,10 @@ from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
 from src.sequence import Sequence
-from src.visualization import plot_benchmark_frame, render_check_outputs
+from src.visualization import draw_frame, render_check_outputs
 
-N = 16
-FILL_RATE = 0.50
+N = 20
+TARGET_SIDE = 7
 SEED = 260405317
 STORAGE_PERIOD = 2
 STORAGE_OFFSET = 0
@@ -58,84 +57,47 @@ def storage_sites(
     return [(i, j) for i in range(offset, N, period) for j in range(offset, N, period)]
 
 
-def random_loaded_sites(sites: list[Site], fill_rate: float, seed: int) -> list[Site]:
+def random_loaded_sites(sites: list[Site], atom_count: int, seed: int) -> list[Site]:
+    if not 0 <= atom_count <= len(sites):
+        raise ValueError("atom_count must be between 0 and the number of sites")
+
     rng = random.Random(seed)
-    loaded = [site for site in sites if rng.random() < fill_rate]
-    if not loaded:
-        loaded.append(sites[len(sites) // 2])
-    return loaded
+    loaded = list(sites)
+    rng.shuffle(loaded)
+    return sorted(loaded[:atom_count])
 
 
-def square_plus_parking_targets(
-    sites: list[Site], atom_count: int
-) -> tuple[list[Site], int]:
-    """Largest centered LxL defect-free square plus parking for leftovers."""
-    if atom_count <= 0:
-        return [], 0
-
+def centered_storage_square_targets(N: int, sites: list[Site], side: int) -> list[Site]:
+    """Centered side x side target square on the provided storage sites."""
     rows = sorted({site[0] for site in sites})
     cols = sorted({site[1] for site in sites})
-    side_limit = min(len(rows), len(cols))
-    L = min(int(math.isqrt(atom_count)), side_limit)
-    if L == 0:
-        return [], 0
+    if not 0 < side <= min(len(rows), len(cols)):
+        raise ValueError("target side must fit within the storage subgrid")
 
-    row_start = (len(rows) - L) // 2
-    col_start = (len(cols) - L) // 2
-    square = [
+    row_start = _centered_window_start(rows, side, (N - 1) / 2.0)
+    col_start = _centered_window_start(cols, side, (N - 1) / 2.0)
+    return [
         (rows[ri], cols[cj])
-        for ri in range(row_start, row_start + L)
-        for cj in range(col_start, col_start + L)
+        for ri in range(row_start, row_start + side)
+        for cj in range(col_start, col_start + side)
     ]
-    square_set = set(square)
-    leftovers = atom_count - len(square)
-
-    parking: list[Site] = []
-    for site in _parking_site_order(sites, rows, cols, row_start, col_start, L):
-        if site not in square_set:
-            parking.append(site)
-            if len(parking) == leftovers:
-                break
-
-    if len(parking) != leftovers:
-        raise ValueError("not enough parking sites for leftover atoms")
-    return square + parking, L
 
 
-def _parking_site_order(
-    sites: list[Site],
-    rows: list[int],
-    cols: list[int],
-    row_start: int,
-    col_start: int,
-    L: int,
-) -> list[Site]:
-    row_index = {row: idx for idx, row in enumerate(rows)}
-    col_index = {col: idx for idx, col in enumerate(cols)}
-    row_center = (len(rows) - 1) / 2.0
-    col_center = (len(cols) - 1) / 2.0
-    square_row_center = row_start + (L - 1) / 2.0
-    square_col_center = col_start + (L - 1) / 2.0
-
-    return sorted(
-        sites,
-        key=lambda site: (
-            abs(row_index[site[0]] - square_row_center)
-            + abs(col_index[site[1]] - square_col_center),
-            abs(row_index[site[0]] - row_center) + abs(col_index[site[1]] - col_center),
-            site,
-        ),
+def _centered_window_start(values: list[int], side: int, center: float) -> int:
+    return min(
+        range(len(values) - side + 1),
+        key=lambda start: abs((values[start] + values[start + side - 1]) / 2.0 - center),
     )
 
 
 def make_request() -> tuple[RoutingRequest, int, int]:
     grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
     allowed_sites = storage_sites(N)
-    src = random_loaded_sites(allowed_sites, FILL_RATE, SEED)
-    dst, square_side = square_plus_parking_targets(allowed_sites, len(src))
+    src = random_loaded_sites(allowed_sites, TARGET_SIDE * TARGET_SIDE, SEED)
+    dst = centered_storage_square_targets(N, allowed_sites, TARGET_SIDE)
     return (
         RoutingRequest(grid=grid, src=src, dst=dst, labeled=False),
-        square_side,
+        TARGET_SIDE,
         len(allowed_sites),
     )
 
@@ -185,13 +147,12 @@ def plot_benchmark(
     if not sequences:
         raise RuntimeError("no successful scheduler result to render")
 
-    fig, _ = plot_benchmark_frame(
+    fig, _ = draw_frame(
         sequences,
         0.0,
+        view="benchmark",
         static_traps=static_traps,
         quality="speed",
-        show_planned=True,
-        show_atom_ids=False,
         title="Defect-free assembly benchmark",
     )
     fig.savefig(out_path, dpi=120, facecolor="white")
@@ -203,21 +164,17 @@ def render_pebble_outputs(
     request: RoutingRequest,
     square_side: int,
 ) -> None:
-    static_traps = request.dst[: square_side * square_side]
+    static_traps = request.dst
     render_check_outputs(
         sequence,
         OUT_DIR,
         PREFIX,
         static_traps=static_traps,
         view="demo",
-        show_planned=True,
-        addressed_style="edge",
         title_prefix=f"RIPA pebble defect-free assembly - target {square_side}x{square_side}",
         gif_fps=6,
-        gif_frames=100,
         gif_hold_seconds=1.5,
         quality="speed",
-        use_multiprocessing=True,
     )
 
 
@@ -235,7 +192,7 @@ def main() -> None:
     print(
         f"seed={SEED}, N={N}, storage_sites={storage_count}, "
         f"loaded={len(request.src)} atoms ({len(request.src) / storage_count:.1%}), "
-        f"target={square_side}x{square_side} plus parking"
+        f"target={square_side}x{square_side}"
     )
 
     results = benchmark_schedulers(
@@ -254,7 +211,7 @@ def main() -> None:
     assert_request_satisfied(pebble.sequence, request)
 
     if not args.no_render:
-        static_traps = request.dst[: square_side * square_side]
+        static_traps = request.dst
         plot_benchmark(results, OUT_DIR / f"{PREFIX}_benchmark.png", static_traps)
         render_pebble_outputs(pebble.sequence, request, square_side)
 

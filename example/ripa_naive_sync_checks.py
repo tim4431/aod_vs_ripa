@@ -47,13 +47,10 @@ def save_check_frames(prefix: str, sequence, request: RoutingRequest) -> None:
         prefix,
         static_traps=request.dst,
         view="demo",
-        show_planned=True,
-        addressed_style="edge",
         title_prefix=prefix,
         gif_fps=8,
         gif_hold_seconds=0.8,
         quality="speed",
-        use_multiprocessing=False,
     )
 
 

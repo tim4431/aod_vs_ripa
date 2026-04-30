@@ -1,9 +1,7 @@
-"""Demo: assemble a defect-free 2D atom array with the AOD scheduler.
+"""Demo: assemble a centered 7x7 defect-free atom array with the AOD scheduler.
 
-The source array is randomly loaded at about 50% filling. The target uses
-the largest square that can be made defect-free with the available atoms;
-any extra atoms are parked outside that square so the unlabeled routing
-request preserves atom count.
+The source array contains exactly 49 atoms randomly placed on an N x N grid.
+Those atoms are routed into the centered 7x7 target square.
 
 Outputs are written to `render/`:
     - `aod_defect_free_assembly_t0.png`
@@ -13,7 +11,6 @@ Outputs are written to `render/`:
 
 from __future__ import annotations
 
-import math
 import random
 import sys
 from pathlib import Path
@@ -29,7 +26,7 @@ from src.visualization import render_check_outputs
 
 
 N = 10
-FILL_RATE = 0.50
+TARGET_SIDE = 7
 SEED = 260405317
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 4.0
@@ -39,67 +36,36 @@ OUT_DIR = ROOT / "render"
 PREFIX = "aod_defect_free_assembly"
 
 
-def random_loaded_sites(N: int, fill_rate: float, seed: int) -> list[Site]:
+def random_loaded_sites(N: int, atom_count: int, seed: int) -> list[Site]:
+    if not 0 <= atom_count <= N * N:
+        raise ValueError("atom_count must be between 0 and N*N")
+
     rng = random.Random(seed)
-    sites = [
-        (i, j)
-        for i in range(N)
-        for j in range(N)
-        if rng.random() < fill_rate
-    ]
-    if not sites:
-        center = N // 2
-        sites.append((center, center))
-    return sites
-
-
-def square_plus_parking_targets(N: int, atom_count: int) -> tuple[list[Site], int]:
-    """Largest centered LxL defect-free square plus parking for leftovers."""
-    L = int(math.isqrt(atom_count))
-    if L == 0:
-        return [], 0
-
-    start = (N - L) // 2
-    square = [
-        (i, j)
-        for i in range(start, start + L)
-        for j in range(start, start + L)
-    ]
-    square_set = set(square)
-    leftovers = atom_count - len(square)
-
-    parking: list[Site] = []
-    for site in _parking_site_order(N, start, L):
-        if site not in square_set:
-            parking.append(site)
-            if len(parking) == leftovers:
-                break
-
-    if len(parking) != leftovers:
-        raise ValueError("not enough parking sites for leftover atoms")
-    return square + parking, L
-
-
-def _parking_site_order(N: int, square_start: int, L: int) -> list[Site]:
-    center = (N - 1) / 2
-    square_center = square_start + (L - 1) / 2
     sites = [(i, j) for i in range(N) for j in range(N)]
-    return sorted(
-        sites,
-        key=lambda site: (
-            abs(site[0] - square_center) + abs(site[1] - square_center),
-            abs(site[0] - center) + abs(site[1] - center),
-            site,
-        ),
-    )
+    rng.shuffle(sites)
+    return sorted(sites[:atom_count])
+
+
+def centered_square_targets(N: int, side: int) -> list[Site]:
+    """Centered side x side target square."""
+    if not 0 < side <= N:
+        raise ValueError("target side must be between 1 and N")
+
+    start = (N - side) // 2
+    return [
+        (i, j)
+        for i in range(start, start + side)
+        for j in range(start, start + side)
+    ]
 
 
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
-    src = random_loaded_sites(N, FILL_RATE, SEED)
-    dst, square_side = square_plus_parking_targets(N, len(src))
+    target_atom_count = TARGET_SIDE * TARGET_SIDE
+    src = random_loaded_sites(N, target_atom_count, SEED)
+    dst = centered_square_targets(N, TARGET_SIDE)
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=False)
 
     scheduler = SqrtTimeAODScheduler(
@@ -115,7 +81,8 @@ def main() -> None:
     total_us = sequence.total_duration() * 1e6
     print(
         f"seed={SEED}, N={N}, loaded={len(src)} atoms "
-        f"({len(src) / (N * N):.1%}), square={square_side}x{square_side}"
+        f"({len(src) / (N * N):.1%}), "
+        f"target={TARGET_SIDE}x{TARGET_SIDE}"
     )
     print(
         f"aod_steps={len(sequence.steps)}, "
@@ -123,20 +90,17 @@ def main() -> None:
         f"three_step={scheduler.binary_plan.used_three_step}"
     )
 
-    static_traps = dst[: square_side * square_side]
+    static_traps = dst
     render_check_outputs(
         sequence,
         OUT_DIR,
         PREFIX,
         static_traps=static_traps,
         view="demo",
-        show_planned=True,
-        addressed_style="edge",
-        title_prefix=f"AOD defect-free assembly - target {square_side}x{square_side}",
+        title_prefix=f"AOD defect-free assembly - target {TARGET_SIDE}x{TARGET_SIDE}",
         gif_fps=6,
         gif_hold_seconds=1.5,
         quality="speed",
-        use_multiprocessing=True,
         show_progress=True,
     )
 
