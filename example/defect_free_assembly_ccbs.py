@@ -102,7 +102,6 @@ def plot_benchmark(
 
 
 def render_ccbs_outputs(sequence: Sequence, request: RoutingRequest) -> None:
-    gif_frame_dt = max(sequence.total_duration() / 100.0, 10e-6)
     render_check_outputs(
         sequence,
         OUT_DIR,
@@ -111,7 +110,7 @@ def render_ccbs_outputs(sequence: Sequence, request: RoutingRequest) -> None:
         view="demo",
         title_prefix=f"RIPA CCBS defect-free assembly - target {TARGET_SIDE}x{TARGET_SIDE}",
         gif_fps=6,
-        gif_frame_dt=gif_frame_dt,
+        gif_time_dilation=3e4,
         gif_hold_seconds=1.5,
         quality="speed",
     )

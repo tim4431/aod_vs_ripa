@@ -64,7 +64,6 @@ def assert_request_satisfied(sequence: Sequence, request: RoutingRequest) -> Non
 
 
 def render_pairwise_outputs(sequence: Sequence, request: RoutingRequest) -> None:
-    gif_frame_dt = max(sequence.total_duration() / 100.0, 10e-6)
     render_check_outputs(
         sequence,
         OUT_DIR,
@@ -74,7 +73,7 @@ def render_pairwise_outputs(sequence: Sequence, request: RoutingRequest) -> None
         show_atom_ids=True,
         title_prefix=f"RIPA pebble adv pairwise random - {ATOM_COUNT} atoms",
         gif_fps=6,
-        gif_frame_dt=gif_frame_dt,
+        gif_time_dilation=3e4,
         gif_hold_seconds=1.5,
         quality="speed",
     )

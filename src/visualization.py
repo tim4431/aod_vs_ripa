@@ -397,7 +397,7 @@ def draw_atom_panel(
     quality: RenderQuality = "speed",
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     static_traps: Iterable[Site] | None = None,
-    planned_trajectory: PlannedTrajectoryMode = "full",
+    planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
     title: str | None = None,
@@ -447,7 +447,7 @@ def draw_frame(
     labels: Iterable[str] | None = None,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     static_traps: Iterable[Site] | None = None,
-    planned_trajectory: PlannedTrajectoryMode = "full",
+    planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
     title: str | None = None,
@@ -545,11 +545,11 @@ def render_animation(
     quality: RenderQuality = "speed",
     labels: Iterable[str] | None = None,
     fps: int = 20,
-    frame_dt: float = 10e-6,
+    time_dilation: float = 1e4,
     hold_seconds: float = 1.0,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     static_traps: Iterable[Site] | None = None,
-    planned_trajectory: PlannedTrajectoryMode = "full",
+    planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing_on_start: bool = True,
     title: str | None = None,
@@ -557,14 +557,16 @@ def render_animation(
 ) -> Path:
     """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into a GIF.
 
-    The frame count is `ceil(total_duration / frame_dt) + 1`. `fps` controls
-    GIF playback only; the physics timeline is visualized, not played in
-    real time.
+    GIF speed is controlled by exactly two parameters:
+      - `time_dilation`: animation seconds per 1 second of execution time.
+        e.g. `time_dilation=1e4` plays a 100 us run as a 1 s GIF.
+      - `fps`: GIF playback frame rate.
+    The physics-time step per frame is `1 / (time_dilation * fps)`.
     """
     if fps <= 0:
         raise ValueError("fps must be positive")
-    if frame_dt <= 0:
-        raise ValueError("frame_dt must be positive")
+    if time_dilation <= 0:
+        raise ValueError("time_dilation must be positive")
     if view not in ("demo", "benchmark", "detail"):
         raise ValueError("view must be 'demo', 'benchmark', or 'detail'")
 
@@ -587,6 +589,7 @@ def render_animation(
         ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
         total = ensemble.total_duration()
 
+    frame_dt = 1.0 / (time_dilation * fps)
     moving_times = (
         np.array([0.0], dtype=float)
         if total <= 0
@@ -639,7 +642,7 @@ def render_check_outputs(
     *,
     render_gif: bool = True,
     gif_fps: int = 8,
-    gif_frame_dt: float = 10e-6,
+    gif_time_dilation: float = 1e4,
     gif_hold_seconds: float = 1.0,
     title_prefix: str | None = None,
     **visual_kwargs: Any,
@@ -687,7 +690,7 @@ def render_check_outputs(
         anim_kwargs = {k: v for k, v in visual_kwargs.items() if k != "title"}
         render_animation(
             motion, paths["gif"], fps=gif_fps,
-            frame_dt=gif_frame_dt, hold_seconds=gif_hold_seconds,
+            time_dilation=gif_time_dilation, hold_seconds=gif_hold_seconds,
             **anim_kwargs,
         )
     return paths
