@@ -135,7 +135,8 @@ def main() -> None:
         gif_fps=6,
         gif_hold_seconds=1.5,
         optimize="speed",
-        use_multiprocessing=False,
+        use_multiprocessing=True,
+        show_progress=True,
     )
 
 

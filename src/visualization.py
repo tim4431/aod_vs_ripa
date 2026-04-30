@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import math
+import os
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from .ripa_freq import RIPASpec, nu_col, nu_row
 from .segments import Segment
 
 Site = tuple[int, int]
+ToneChannel = Literal["row", "col"]
+ToneHardware = Literal["AOD", "EOM", "AOD/EOM", "tone"]
+PlannedTrajectoryMode = Literal["none", "full", "next"]
 AddressedStyle = Literal["edge", "blob", "both", "none"]
 OptimizeMode = Literal["speed", "performance", "quality"]
 
@@ -58,6 +62,7 @@ def plot_atom_plane(
     addressed_style: AddressedStyle = "edge",
     show_motion_blur: bool = True,
     show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
     show_atom_ids: bool = True,
     trail_samples: int = 8,
     trail_duration: float | None = None,
@@ -69,9 +74,14 @@ def plot_atom_plane(
 
     Coordinates are physical micrometers. The underlying atom labels remain
     the codebase's `(i, j)` grid units, with `(0, 0)` at the lower-left site.
+    `planned_trajectory` may be "none", "full", or "next"; when omitted,
+    the old `show_planned` boolean selects "full" or "none".
     """
 
     ensemble = _as_ensemble(timeline)
+    planned_mode = _resolve_planned_trajectory_mode(
+        show_planned, planned_trajectory
+    )
     base = _build_base_payload(
         ensemble,
         spec=None,
@@ -87,7 +97,7 @@ def plot_atom_plane(
         base["spec"],
         timeline=timeline,
         show_motion_blur=show_motion_blur,
-        show_planned=show_planned,
+        planned_trajectory=planned_mode,
         trail_samples=trail_samples,
         trail_duration=trail_duration,
         planned_samples_per_segment=planned_samples_per_segment,
@@ -116,7 +126,7 @@ def plot_frequency_tones(
     frequency_label: str = "nu / FSR1 (mod 1)",
     tone_samples_per_segment: int = 64,
 ) -> Any:
-    """Draw row/col EOM tone panels on a 2x2 axes object.
+    """Draw row/col tone panels on a 2x2 axes object.
 
     `axes` may be a numpy array from `plt.subplots(2, 2)` or a nested
     sequence in the order `[[row_tones, col_tones], [row_history, col_history]]`.
@@ -138,7 +148,7 @@ def plot_frequency_tones(
         base["spec"],
         timeline=timeline,
         show_motion_blur=False,
-        show_planned=False,
+        planned_trajectory="none",
         trail_samples=0,
         trail_duration=None,
         planned_samples_per_segment=0,
@@ -146,8 +156,9 @@ def plot_frequency_tones(
     row_tones, col_tones, row_hist, col_hist = _normalize_frequency_axes(axes)
     _plot_current_tones_payload(row_tones, base, frame, "row")
     _plot_current_tones_payload(col_tones, base, frame, "col")
-    _plot_tone_history_payload(row_hist, base, frame, "row", show_future)
-    _plot_tone_history_payload(col_hist, base, frame, "col", show_future)
+    planned_mode = "full" if show_future else "none"
+    _plot_tone_history_payload(row_hist, base, frame, "row", planned_mode)
+    _plot_tone_history_payload(col_hist, base, frame, "col", planned_mode)
     return axes
 
 
@@ -163,6 +174,7 @@ def plot_frame(
     addressed_style: AddressedStyle = "edge",
     show_motion_blur: bool = True,
     show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
     frequency_label: str = "nu / FSR1 (mod 1)",
@@ -175,10 +187,17 @@ def plot_frame(
     figsize: tuple[float, float] = (12.0, 6.2),
     title: str | None = None,
 ) -> tuple[Any, VisualizationAxes]:
-    """Draw the full animation frame: atom plane left, tone panels right."""
+    """Draw the full animation frame: atom plane left, tone panels right.
+
+    `planned_trajectory` may be "none", "full", or "next"; when omitted,
+    the old `show_planned` boolean selects "full" or "none".
+    """
 
     plt = _load_pyplot()
     ensemble = _as_ensemble(timeline)
+    planned_mode = _resolve_planned_trajectory_mode(
+        show_planned, planned_trajectory
+    )
 
     if axes is None:
         fig = (
@@ -216,7 +235,7 @@ def plot_frame(
         base["spec"],
         timeline=timeline,
         show_motion_blur=show_motion_blur,
-        show_planned=show_planned,
+        planned_trajectory=planned_mode,
         trail_samples=trail_samples,
         trail_duration=trail_duration,
         planned_samples_per_segment=planned_samples_per_segment,
@@ -228,7 +247,7 @@ def plot_frame(
         frame,
         addressed_style=addressed_style,
         show_atom_ids=show_atom_ids,
-        show_future=show_planned,
+        planned_trajectory=planned_mode,
         atom_size=atom_size,
         trap_size=trap_size,
         title=title,
@@ -274,11 +293,13 @@ def render_animation(
     addressed_style: AddressedStyle | None = None,
     show_motion_blur: bool = True,
     show_planned: bool = True,
+    planned_trajectory: PlannedTrajectoryMode | None = None,
     show_atom_ids: bool = True,
     time_unit: Literal["s", "ms", "us", "ns"] = "us",
     frequency_label: str = "nu / FSR1 (mod 1)",
     figsize: tuple[float, float] = (12.0, 6.2),
     dpi: int | None = None,
+    show_progress: bool = True,
 ) -> Path:
     """Render a PNG frame sequence and combine it into a GIF.
 
@@ -288,8 +309,9 @@ def render_animation(
     speed is controlled by `fps`; the physics timeline is visualized, not
     played in real time.
 
-    On platforms where process spawning is unavailable from the caller's
-    context, rendering falls back to sequential frame generation.
+    Frame PNGs are rendered in parallel when `use_multiprocessing` is true.
+    Progress bars use `tqdm` when installed, with a simple stderr fallback.
+    `planned_trajectory` controls future paths: "none", "full", or "next".
     """
 
     if fps <= 0:
@@ -301,6 +323,9 @@ def render_animation(
 
     ensemble = _as_ensemble(timeline)
     mode = _normalize_optimize(optimize)
+    planned_mode = _resolve_planned_trajectory_mode(
+        show_planned, planned_trajectory
+    )
     resolved_dpi = dpi if dpi is not None else (90 if mode == "speed" else 140)
     resolved_style = addressed_style or ("edge" if mode == "speed" else "blob")
     trail_samples = 5 if mode == "speed" else 12
@@ -345,25 +370,30 @@ def render_animation(
         tone_samples_per_segment=tone_samples,
     )
     frame_payloads = [
-            _build_frame_payload(
-                ensemble,
-                float(t),
-                base["spec"],
-                timeline=timeline,
-                show_motion_blur=show_motion_blur,
-                show_planned=show_planned,
-                trail_samples=trail_samples,
+        _build_frame_payload(
+            ensemble,
+            float(t),
+            base["spec"],
+            timeline=timeline,
+            show_motion_blur=show_motion_blur,
+            planned_trajectory=planned_mode,
+            trail_samples=trail_samples,
             trail_duration=None,
             planned_samples_per_segment=planned_samples,
         )
-        for t in frame_schedule
+        for t in _progress_iter(
+            frame_schedule,
+            total=len(frame_schedule),
+            desc="prepare frames",
+            enabled=show_progress,
+        )
     ]
     options = {
         "figsize": figsize,
         "dpi": resolved_dpi,
         "addressed_style": resolved_style,
         "show_atom_ids": show_atom_ids,
-        "show_future": show_planned,
+        "planned_trajectory": planned_mode,
         "atom_size": 62.0 if mode == "speed" else 75.0,
         "trap_size": 10.0 if mode == "speed" else 14.0,
         "title": None,
@@ -378,8 +408,11 @@ def render_animation(
                 options,
                 use_multiprocessing=use_multiprocessing,
                 workers=workers,
+                show_progress=show_progress,
             )
-            _save_gif_from_pngs(frame_paths, out, fps=fps)
+            _save_gif_from_pngs(
+                frame_paths, out, fps=fps, show_progress=show_progress
+            )
     else:
         frame_root = Path(frames_dir) if frames_dir is not None else out.with_suffix("")
         frame_root.mkdir(parents=True, exist_ok=True)
@@ -390,8 +423,9 @@ def render_animation(
             options,
             use_multiprocessing=use_multiprocessing,
             workers=workers,
+            show_progress=show_progress,
         )
-        _save_gif_from_pngs(frame_paths, out, fps=fps)
+        _save_gif_from_pngs(frame_paths, out, fps=fps, show_progress=show_progress)
 
     return out
 
@@ -425,6 +459,7 @@ def render_check_outputs(
         "frames_dir",
         "keep_frames",
         "optimize",
+        "show_progress",
         "use_multiprocessing",
         "workers",
     }
@@ -516,6 +551,7 @@ def _build_base_payload(
     row_trajs, col_trajs = _collect_tone_trajectories(
         ensemble, resolved_spec, max(2, int(tone_samples_per_segment))
     )
+    tone_hardware = _tone_hardware_name(ensemble)
     lo, hi = _site_extent_um(grid)
 
     return {
@@ -532,6 +568,7 @@ def _build_base_payload(
         "spec": resolved_spec,
         "row_trajectories": row_trajs,
         "col_trajectories": col_trajs,
+        "tone_hardware": tone_hardware,
         "total_duration": ensemble.total_duration(),
         "time_unit": time_unit,
         "time_factor": _TIME_FACTORS[time_unit],
@@ -546,7 +583,7 @@ def _build_frame_payload(
     *,
     timeline: Any | None = None,
     show_motion_blur: bool,
-    show_planned: bool,
+    planned_trajectory: PlannedTrajectoryMode,
     trail_samples: int,
     trail_duration: float | None,
     planned_samples_per_segment: int,
@@ -571,7 +608,7 @@ def _build_frame_payload(
                     {
                         "idx": idx,
                         "atom_id": int(atom.atom_id),
-                        "freq": nu_row(pos[0], pos[1], spec),
+                        "freq": _tone_frequency("row", pos, spec, segment=seg),
                     }
                 )
             if "col" in channels:
@@ -579,7 +616,7 @@ def _build_frame_payload(
                     {
                         "idx": idx,
                         "atom_id": int(atom.atom_id),
-                        "freq": nu_col(pos[0], pos[1], spec),
+                        "freq": _tone_frequency("col", pos, spec, segment=seg),
                     }
                 )
             if show_motion_blur and trail_samples > 1:
@@ -593,8 +630,12 @@ def _build_frame_payload(
                 if len(xy) > 1:
                     trails.append({"idx": idx, "xy": xy})
 
-        if show_planned and planned_samples_per_segment > 1:
-            for future_seg in _future_segments(atom, t):
+        if planned_trajectory != "none" and planned_samples_per_segment > 1:
+            future_segments = list(_future_segments(atom, t))
+            if planned_trajectory == "next":
+                future_segments = future_segments[:1]
+
+            for future_seg in future_segments:
                 t0 = max(float(t), future_seg.start_time)
                 xy = _sample_segment_xy(
                     ensemble.grid,
@@ -633,7 +674,7 @@ def _plot_payload_frame(
     *,
     addressed_style: AddressedStyle,
     show_atom_ids: bool,
-    show_future: bool,
+    planned_trajectory: PlannedTrajectoryMode,
     atom_size: float,
     trap_size: float,
     title: str | None,
@@ -649,8 +690,12 @@ def _plot_payload_frame(
     )
     _plot_current_tones_payload(axes.row_tones, base, frame, "row")
     _plot_current_tones_payload(axes.col_tones, base, frame, "col")
-    _plot_tone_history_payload(axes.row_trajectories, base, frame, "row", show_future)
-    _plot_tone_history_payload(axes.col_trajectories, base, frame, "col", show_future)
+    _plot_tone_history_payload(
+        axes.row_trajectories, base, frame, "row", planned_trajectory
+    )
+    _plot_tone_history_payload(
+        axes.col_trajectories, base, frame, "col", planned_trajectory
+    )
 
     if title is None:
         t_label = _format_time(frame["t"], base["time_unit"])
@@ -798,11 +843,18 @@ def _plot_atom_plane_payload(
     ax.set_title(f"atom plane  -  t = {_format_time(frame['t'], 'us')}")
 
 
+def _tone_panel_title(channel: ToneChannel, hardware: ToneHardware) -> str:
+    axis = "x" if channel == "row" else "y"
+    if hardware == "tone":
+        return f"{channel} tone (controls {axis})"
+    return f"{channel} {hardware} (controls {axis})"
+
+
 def _plot_current_tones_payload(
     ax: Any,
     base: dict[str, Any],
     frame: dict[str, Any],
-    channel: Literal["row", "col"],
+    channel: ToneChannel,
 ) -> None:
     ax.clear()
     spec: RIPASpec = base["spec"]
@@ -829,8 +881,7 @@ def _plot_current_tones_payload(
     ax.set_ylim(0.0, 1.2)
     ax.set_xlabel(base["frequency_label"])
     ax.set_ylabel("amplitude")
-    title = "row EOM (controls x)" if channel == "row" else "col EOM (controls y)"
-    ax.set_title(title)
+    ax.set_title(_tone_panel_title(channel, base["tone_hardware"]))
     ax.grid(True, color="#e5e5e5", linewidth=0.6)
 
 
@@ -838,8 +889,8 @@ def _plot_tone_history_payload(
     ax: Any,
     base: dict[str, Any],
     frame: dict[str, Any],
-    channel: Literal["row", "col"],
-    show_future: bool,
+    channel: ToneChannel,
+    planned_trajectory: PlannedTrajectoryMode,
 ) -> None:
     ax.clear()
     spec: RIPASpec = base["spec"]
@@ -847,12 +898,17 @@ def _plot_tone_history_payload(
     trajs = base["row_trajectories"] if channel == "row" else base["col_trajectories"]
     colors = base["colors"]
     t_now = float(frame["t"])
+    next_by_atom = (
+        _next_tone_trajectory_by_atom(trajs, t_now)
+        if planned_trajectory == "next"
+        else {}
+    )
 
     for traj in trajs:
         ts = np.asarray(traj["times"], dtype=float)
         nus = _frequencies_for_display(np.asarray(traj["freqs"], dtype=float), spec)
         idx = int(traj["idx"])
-        if show_future:
+        if planned_trajectory == "full":
             _plot_wrapped_frequency_line(
                 ax,
                 ts * time_factor,
@@ -874,6 +930,18 @@ def _plot_tone_history_payload(
                     linewidth=1.4,
                     alpha=0.45,
                 )
+            if planned_trajectory == "next" and next_by_atom.get(idx) is traj:
+                mask = ts >= t_now - 1e-15
+                if np.count_nonzero(mask) >= 2:
+                    _plot_wrapped_frequency_line(
+                        ax,
+                        ts[mask] * time_factor,
+                        nus[mask],
+                        1.0,
+                        color=colors[idx],
+                        linewidth=1.4,
+                        alpha=0.35,
+                    )
 
     total = max(float(base["total_duration"]), t_now)
     x_hi = max(total * time_factor, 1.0)
@@ -902,6 +970,20 @@ def _plot_wrapped_frequency_line(
     for start, end in zip(starts, ends):
         if end - start >= 2:
             ax.plot(xs[start:end], ys[start:end], **plot_kwargs)
+
+
+def _next_tone_trajectory_by_atom(
+    trajectories: list[dict[str, Any]],
+    t: float,
+) -> dict[int, dict[str, Any]]:
+    selected: dict[int, dict[str, Any]] = {}
+    for traj in trajectories:
+        idx = int(traj["idx"])
+        if idx in selected:
+            continue
+        if float(traj["end_time"]) > t + 1e-15:
+            selected[idx] = traj
+    return selected
 
 
 def _frequency_for_display(
@@ -1184,7 +1266,7 @@ def _time_for_path_fraction(
     return (left + right) / 2.0
 
 
-def _channels_for_segment(seg: Segment) -> tuple[Literal["row", "col"], ...]:
+def _channels_for_segment(seg: Segment) -> tuple[ToneChannel, ...]:
     if seg.channel == "row":
         return ("row",)
     if seg.channel == "col":
@@ -1199,6 +1281,57 @@ def _channels_for_segment(seg: Segment) -> tuple[Literal["row", "col"], ...]:
     if di == 0 and dj != 0:
         return ("col",)
     return ("row", "col")
+
+
+def _tone_hardware_name(ensemble: AtomEnsemble) -> ToneHardware:
+    hardware: set[ToneHardware] = set()
+    for atom in ensemble.atomtrajs:
+        for seg in atom.segments:
+            if seg.duration <= 0:
+                continue
+            if seg.channel == "aod":
+                hardware.add("AOD")
+            elif seg.channel in ("row", "col"):
+                hardware.add("EOM")
+
+    if hardware == {"AOD"}:
+        return "AOD"
+    if hardware == {"EOM"}:
+        return "EOM"
+    if hardware == {"AOD", "EOM"}:
+        return "AOD/EOM"
+    return "tone"
+
+
+def _tone_frequency(
+    channel: ToneChannel,
+    position_ij: tuple[float, float],
+    spec: RIPASpec,
+    *,
+    segment: Segment,
+) -> float:
+    if segment.channel == "aod":
+        return _aod_tone_frequency(channel, position_ij, spec)
+    return _ripa_tone_frequency(channel, position_ij, spec)
+
+
+def _ripa_tone_frequency(
+    channel: ToneChannel,
+    position_ij: tuple[float, float],
+    spec: RIPASpec,
+) -> float:
+    i, j = position_ij
+    return nu_row(i, j, spec) if channel == "row" else nu_col(i, j, spec)
+
+
+def _aod_tone_frequency(
+    channel: ToneChannel,
+    position_ij: tuple[float, float],
+    spec: RIPASpec,
+) -> float:
+    i, j = position_ij
+    coordinate = i if channel == "row" else j
+    return (float(coordinate) * spec.fsr2()) % spec.FSR1
 
 
 def _collect_tone_trajectories(
@@ -1222,8 +1355,14 @@ def _collect_tone_trajectories(
                         "idx": idx,
                         "atom_id": int(atom.atom_id),
                         "times": ts,
+                        "start_time": float(seg.start_time),
+                        "end_time": float(seg.end_time),
                         "freqs": np.asarray(
-                            [nu_row(i, j, spec) for i, j in ij], dtype=float
+                            [
+                                _tone_frequency("row", (i, j), spec, segment=seg)
+                                for i, j in ij
+                            ],
+                            dtype=float,
                         ),
                     }
                 )
@@ -1233,8 +1372,14 @@ def _collect_tone_trajectories(
                         "idx": idx,
                         "atom_id": int(atom.atom_id),
                         "times": ts,
+                        "start_time": float(seg.start_time),
+                        "end_time": float(seg.end_time),
                         "freqs": np.asarray(
-                            [nu_col(i, j, spec) for i, j in ij], dtype=float
+                            [
+                                _tone_frequency("col", (i, j), spec, segment=seg)
+                                for i, j in ij
+                            ],
+                            dtype=float,
                         ),
                     }
                 )
@@ -1275,6 +1420,59 @@ def _normalize_optimize(optimize: OptimizeMode) -> Literal["speed", "quality"]:
     raise ValueError("optimize must be 'speed', 'performance', or 'quality'")
 
 
+def _resolve_planned_trajectory_mode(
+    show_planned: bool,
+    planned_trajectory: PlannedTrajectoryMode | None,
+) -> PlannedTrajectoryMode:
+    if planned_trajectory is None:
+        return "full" if show_planned else "none"
+    if planned_trajectory in ("none", "full", "next"):
+        return planned_trajectory
+    raise ValueError("planned_trajectory must be 'none', 'full', or 'next'")
+
+
+def _progress_iter(
+    items: Iterable[Any],
+    *,
+    total: int,
+    desc: str,
+    enabled: bool,
+) -> Iterable[Any]:
+    if not enabled:
+        yield from items
+        return
+
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        for index, item in enumerate(items, start=1):
+            if index == 1 or index == total or index % max(1, total // 10) == 0:
+                print(f"{desc}: {index}/{total}", file=sys.stderr, flush=True)
+            yield item
+        return
+
+    yield from tqdm(items, total=total, desc=desc, unit="frame")
+
+
+def _render_worker_count(workers: int | None, task_count: int) -> int:
+    if task_count <= 0:
+        return 0
+    if workers is not None:
+        if workers <= 0:
+            raise ValueError("workers must be positive")
+        return min(int(workers), task_count)
+    return min(os.cpu_count() or 1, task_count)
+
+
+def _render_pool_context() -> Any | None:
+    methods = mp.get_all_start_methods()
+    if sys.platform.startswith("linux") and "fork" in methods:
+        return mp.get_context("fork")
+    if "spawn" in methods and _can_spawn_render_workers():
+        return mp.get_context("spawn")
+    return None
+
+
 def _render_png_frames(
     frame_dir: Path,
     base: dict[str, Any],
@@ -1283,28 +1481,53 @@ def _render_png_frames(
     *,
     use_multiprocessing: bool,
     workers: int | None,
+    show_progress: bool,
 ) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
     frame_paths = [frame_dir / f"frame_{k:05d}.png" for k in range(len(frames))]
     tasks = list(zip(frames, frame_paths))
 
-    if use_multiprocessing and len(tasks) > 1 and _can_spawn_render_workers():
+    worker_count = (
+        _render_worker_count(workers, len(tasks)) if use_multiprocessing else 0
+    )
+    pool_context = _render_pool_context() if use_multiprocessing else None
+    if pool_context is not None and worker_count > 1:
         try:
-            ctx = mp.get_context("spawn")
-            with ctx.Pool(
-                processes=workers,
+            chunk_size = max(1, len(tasks) // (worker_count * 4))
+            with pool_context.Pool(
+                processes=worker_count,
                 initializer=_init_render_worker,
                 initargs=(base, options),
             ) as pool:
-                list(pool.imap_unordered(_render_worker_frame, tasks))
+                rendered = pool.imap_unordered(
+                    _render_worker_frame, tasks, chunksize=chunk_size
+                )
+                list(
+                    _progress_iter(
+                        rendered,
+                        total=len(tasks),
+                        desc=f"render frames ({worker_count} workers)",
+                        enabled=show_progress,
+                    )
+                )
             return frame_paths
         except Exception:
-            for frame, path in tasks:
+            for frame, path in _progress_iter(
+                tasks,
+                total=len(tasks),
+                desc="render missing frames",
+                enabled=show_progress,
+            ):
                 if not path.exists():
                     _render_payload_to_png(base, frame, path, options)
             return frame_paths
 
-    for frame, path in tasks:
+    for frame, path in _progress_iter(
+        tasks,
+        total=len(tasks),
+        desc="render frames",
+        enabled=show_progress,
+    ):
         _render_payload_to_png(base, frame, path, options)
     return frame_paths
 
@@ -1366,7 +1589,7 @@ def _render_payload_to_png(
         frame,
         addressed_style=options["addressed_style"],
         show_atom_ids=bool(options["show_atom_ids"]),
-        show_future=bool(options["show_future"]),
+        planned_trajectory=options["planned_trajectory"],
         atom_size=float(options["atom_size"]),
         trap_size=float(options["trap_size"]),
         title=options.get("title"),
@@ -1376,7 +1599,11 @@ def _render_payload_to_png(
 
 
 def _save_gif_from_pngs(
-    frame_paths: list[Path], output_path: Path, *, fps: int
+    frame_paths: list[Path],
+    output_path: Path,
+    *,
+    fps: int,
+    show_progress: bool,
 ) -> None:
     if not frame_paths:
         raise ValueError("no frames to save")
@@ -1385,7 +1612,15 @@ def _save_gif_from_pngs(
     try:
         from PIL import Image
 
-        images = [Image.open(path) for path in frame_paths]
+        images = [
+            Image.open(path)
+            for path in _progress_iter(
+                frame_paths,
+                total=len(frame_paths),
+                desc="load gif frames",
+                enabled=show_progress,
+            )
+        ]
         try:
             images[0].save(
                 output_path,
@@ -1407,5 +1642,15 @@ def _save_gif_from_pngs(
         raise RuntimeError("saving GIFs requires Pillow or imageio") from exc
 
     imageio.mimsave(
-        output_path, [imageio.imread(path) for path in frame_paths], duration=1 / fps
+        output_path,
+        [
+            imageio.imread(path)
+            for path in _progress_iter(
+                frame_paths,
+                total=len(frame_paths),
+                desc="load gif frames",
+                enabled=show_progress,
+            )
+        ],
+        duration=1 / fps,
     )

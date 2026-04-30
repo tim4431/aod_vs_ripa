@@ -12,7 +12,6 @@ If i ramp the frequency you can see the tweezer continuously move along `x` (row
 
 - **Col channel** (90° rotated): along `y`, so the corresponding frequency tone is
   ```
-  ν_col(i, j) = (i / N + j) · FSR2     (mod FSR1)
+  ν_col(i, j) = (i + j / N) · FSR2     (mod FSR1)
   ```
   Used while moving along `y`.
-

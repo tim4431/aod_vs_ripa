@@ -6,10 +6,10 @@ and FSR2 = FSR1 / N along the slow axis, the row and column channels
 (rotated 90 deg from each other) read:
 
     nu_row(i, j) = (j + i / N) * FSR2     (mod FSR1)   # moving along x
-    nu_col(i, j) = (i / N + j) * FSR2     (mod FSR1)   # moving along y
+    nu_col(i, j) = (i + j / N) * FSR2     (mod FSR1)   # moving along y
 
-Both formulas can land on the same wrapped frequency. The channel identity
-(row EOM or col EOM) tells the hardware which axis moves.
+The channel identity (row EOM or col EOM) tells the hardware which rotated
+spectrometer axis is being driven.
 
 `nu_row` and `nu_col` return positive modulo frequencies in [0, FSR1).
 The visualization displays these values in normalized FSR1 units,
@@ -42,4 +42,4 @@ def nu_row(i: float, j: float, spec: RIPASpec) -> float:
 
 def nu_col(i: float, j: float, spec: RIPASpec) -> float:
     """Col-channel tone at site (i, j), used while moving along y."""
-    return _wrap((i / spec.N + j) * spec.fsr2(), spec.FSR1)
+    return _wrap((i + j / spec.N) * spec.fsr2(), spec.FSR1)

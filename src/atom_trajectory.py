@@ -28,20 +28,6 @@ from .segments import Segment, make_hold
 _TIME_TOL = 1e-12
 
 
-@dataclass(frozen=True)
-class _TrajectoryPiece:
-    start_time: float
-    end_time: float
-    segment: Segment | None = None
-    position: tuple[float, float] | None = None
-
-    def position_at(self, t: float) -> tuple[float, float]:
-        if self.segment is not None:
-            return self.segment.position_at(t)
-        assert self.position is not None
-        return self.position
-
-
 # --- collision report and error --------------------------------------------
 
 
@@ -124,11 +110,73 @@ class AtomTrajectory:
                 f"atom {self.atom_id}: segment starts at {segment.start_pos} "
                 f"but atom is at {self.final_pos}"
             )
-        if segment.start_time + 1e-12 < self.final_time:
+        if segment.start_time + _TIME_TOL < self.final_time:
             raise ValueError(
                 f"atom {self.atom_id}: segment starts at t={segment.start_time} "
                 f"but previous segment ends at t={self.final_time}"
             )
+
+    def timeline_segments(
+        self,
+        start_time: float,
+        end_time: float,
+        *,
+        candidate: Segment | None = None,
+    ):
+        """Yield move and hold segments covering this atom's time window.
+
+        `segments` is the committed move list. This method is the full
+        timeline view: it fills the gaps with synthetic hold segments.
+        `candidate` lets validation ask what the timeline would look like
+        if a new segment were appended, before mutating `segments`.
+        """
+        if candidate is None:
+            yield from self._committed_timeline_segments(start_time, end_time)
+            return
+
+        before_end = min(end_time, candidate.start_time)
+        if start_time < before_end - _TIME_TOL:
+            yield from self._committed_timeline_segments(start_time, before_end)
+
+        move_start = max(start_time, candidate.start_time)
+        move_end = min(end_time, candidate.end_time)
+        if candidate.duration > 0 and move_start < move_end - _TIME_TOL:
+            yield candidate
+
+        rest_start = max(start_time, candidate.end_time)
+        if rest_start < end_time - _TIME_TOL:
+            yield make_hold(candidate.end_pos, rest_start, end_time - rest_start)
+
+    def _committed_timeline_segments(self, start_time: float, end_time: float):
+        """Expand committed moves plus rest gaps into ordinary segments."""
+        cursor = start_time
+        rest_pos = self.initial_pos
+
+        for seg in self.segments:
+            if seg.end_time <= start_time + _TIME_TOL:
+                rest_pos = seg.end_pos
+                continue
+            if seg.start_time >= end_time - _TIME_TOL:
+                break
+
+            rest_end = min(seg.start_time, end_time)
+            if cursor < rest_end - _TIME_TOL:
+                yield make_hold(rest_pos, cursor, rest_end - cursor)
+                cursor = rest_end
+
+            move_start = max(seg.start_time, cursor, start_time)
+            move_end = min(seg.end_time, end_time)
+            if move_start < move_end - _TIME_TOL:
+                yield seg
+                cursor = move_end
+
+            if seg.end_time <= cursor + _TIME_TOL:
+                rest_pos = seg.end_pos
+            else:
+                return
+
+        if cursor < end_time - _TIME_TOL:
+            yield make_hold(rest_pos, cursor, end_time - cursor)
 
 
 @dataclass
@@ -262,15 +310,19 @@ class AtomEnsemble:
 
         best_grid = float("inf")
         best_t = segment.start_time
-        for piece in self._iter_atom_pieces(
-            other, segment.start_time, segment.end_time, other_candidate
+        for other_segment in other.timeline_segments(
+            segment.start_time,
+            segment.end_time,
+            candidate=other_candidate,
         ):
-            t0 = max(segment.start_time, piece.start_time)
-            t1 = min(segment.end_time, piece.end_time)
+            t0 = max(segment.start_time, other_segment.start_time)
+            t1 = min(segment.end_time, other_segment.end_time)
             if t1 < t0 - _TIME_TOL:
                 continue
 
-            d_grid, t = self._distance_to_piece(segment, piece, t0, t1, rc_grid)
+            d_grid, t = self._distance_between_segments(
+                segment, other_segment, t0, t1, rc_grid
+            )
             if d_grid < best_grid:
                 best_grid = d_grid
                 best_t = t
@@ -281,120 +333,26 @@ class AtomEnsemble:
         """Check simultaneous candidate segments as one mutation."""
         return self._check_candidate_collisions(candidates)
 
-    def _iter_atom_pieces(
+    def _distance_between_segments(
         self,
-        atomtraj: AtomTrajectory,
-        start_time: float,
-        end_time: float,
-        candidate: Segment | None = None,
-    ):
-        if candidate is None:
-            yield from self._iter_existing_pieces(atomtraj, start_time, end_time)
-            return
-
-        before_end = min(end_time, candidate.start_time)
-        if start_time < before_end - _TIME_TOL:
-            yield from self._iter_existing_pieces(atomtraj, start_time, before_end)
-
-        move_start = max(start_time, candidate.start_time)
-        move_end = min(end_time, candidate.end_time)
-        if candidate.duration > 0 and move_start < move_end - _TIME_TOL:
-            yield _TrajectoryPiece(move_start, move_end, segment=candidate)
-
-        rest_start = max(start_time, candidate.end_time)
-        if rest_start < end_time - _TIME_TOL:
-            yield _TrajectoryPiece(
-                rest_start,
-                end_time,
-                position=(float(candidate.end_pos[0]), float(candidate.end_pos[1])),
-            )
-
-    @staticmethod
-    def _iter_existing_pieces(
-        atomtraj: AtomTrajectory, start_time: float, end_time: float
-    ):
-        cursor = start_time
-        rest_pos = atomtraj.initial_pos
-
-        for seg in atomtraj.segments:
-            if seg.end_time <= start_time + _TIME_TOL:
-                rest_pos = seg.end_pos
-                continue
-            if seg.start_time >= end_time - _TIME_TOL:
-                break
-
-            rest_end = min(seg.start_time, end_time)
-            if cursor < rest_end - _TIME_TOL:
-                yield _TrajectoryPiece(
-                    cursor,
-                    rest_end,
-                    position=(float(rest_pos[0]), float(rest_pos[1])),
-                )
-                cursor = rest_end
-
-            move_start = max(seg.start_time, cursor, start_time)
-            move_end = min(seg.end_time, end_time)
-            if move_start < move_end - _TIME_TOL:
-                yield _TrajectoryPiece(move_start, move_end, segment=seg)
-                cursor = move_end
-
-            if seg.end_time <= cursor + _TIME_TOL:
-                rest_pos = seg.end_pos
-            else:
-                return
-
-        if cursor < end_time - _TIME_TOL:
-            yield _TrajectoryPiece(
-                cursor,
-                end_time,
-                position=(float(rest_pos[0]), float(rest_pos[1])),
-            )
-
-    def _distance_to_piece(
-        self,
-        segment: Segment,
-        piece: _TrajectoryPiece,
+        a: Segment,
+        b: Segment,
         t0: float,
         t1: float,
         rc_grid: float,
     ) -> tuple[float, float]:
         if t1 <= t0 + _TIME_TOL:
-            d = self._distance_grid(segment.position_at(t0), piece.position_at(t0))
+            d = self._distance_grid(a.position_at(t0), b.position_at(t0))
             return d, t0
 
-        if piece.segment is None:
-            assert piece.position is not None
-            return self._moving_point_distance(segment, t0, t1, piece.position)
-
         lower = self._bbox_distance_grid(
-            self._segment_bbox(segment, t0, t1),
-            self._segment_bbox(piece.segment, t0, t1),
+            self._segment_bbox(a, t0, t1),
+            self._segment_bbox(b, t0, t1),
         )
         if lower >= rc_grid:
             return lower, t0
 
-        return self._moving_segment_distance(segment, piece.segment, t0, t1)
-
-    def _moving_point_distance(
-        self,
-        segment: Segment,
-        t0: float,
-        t1: float,
-        point: tuple[float, float],
-    ) -> tuple[float, float]:
-        p0 = segment.position_at(t0)
-        p1 = segment.position_at(t1)
-        vx = p1[0] - p0[0]
-        vy = p1[1] - p0[1]
-        length2 = vx * vx + vy * vy
-        if length2 <= 0:
-            return self._distance_grid(p0, point), t0
-
-        u = ((point[0] - p0[0]) * vx + (point[1] - p0[1]) * vy) / length2
-        u = max(0.0, min(1.0, u))
-        closest = (p0[0] + u * vx, p0[1] + u * vy)
-        t = self._time_for_segment_point(segment, closest, t0, t1, u)
-        return self._distance_grid(closest, point), t
+        return self._moving_segment_distance(a, b, t0, t1)
 
     def _moving_segment_distance(
         self,
@@ -498,21 +456,6 @@ class AtomEnsemble:
         dx = pa[0] - pb[0]
         dy = pa[1] - pb[1]
         return dx * dx + dy * dy
-
-    def _time_for_segment_point(
-        self,
-        segment: Segment,
-        point: tuple[float, float],
-        t0: float,
-        t1: float,
-        fallback_fraction: float,
-    ) -> float:
-        axis = segment.motion_axis
-        if axis == "x":
-            return self._time_for_axis_value(segment, point[0], 0, t0, t1)
-        if axis == "y":
-            return self._time_for_axis_value(segment, point[1], 1, t0, t1)
-        return t0 + fallback_fraction * (t1 - t0)
 
     @staticmethod
     def _time_for_axis_value(
