@@ -24,14 +24,19 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Grid:
-    N: int       # grid is N x N
-    d: float     # site spacing [um]
-    rc: float    # collision radius [um]; rc <= d in normal regimes
+    N: int  # grid is N x N
+    d: float  # site spacing [um]
+    rc: float  # collision radius [um]; rc <= d in normal regimes
 
-    def ij_to_xy(self, i: float, j: float) -> tuple[float, float]:
-        """Map (possibly fractional) site index to physical coords, centered."""
-        c = (self.N - 1) / 2.0
-        return (i - c) * self.d, (j - c) * self.d
+    @property
+    def center(self) -> float:
+        """Centering offset: site (N-1)/2 maps to xy = 0."""
+        return (self.N - 1) / 2.0
+
+    def ij_to_xy(self, ij: np.ndarray) -> np.ndarray:
+        """Vectorized grid -> physical (um). Accepts any array whose last
+        axis is 2; returns the same shape with (x, y) values in um."""
+        return (np.asarray(ij, dtype=float) - self.center) * self.d
 
 
 @dataclass
@@ -82,10 +87,14 @@ class AtomConfig:
     def occupancy(self) -> dict[tuple[int, int], int]:
         """Map site -> atom_id. The two key snapshot views are by site
         (this method) and by id (`site_of_atom`)."""
-        return {(int(i), int(j)): int(aid)
-                for (i, j), aid in zip(self.positions, self.atom_ids)}
+        return {
+            (int(i), int(j)): int(aid)
+            for (i, j), aid in zip(self.positions, self.atom_ids)
+        }
 
     def site_of_atom(self) -> dict[int, tuple[int, int]]:
         """Inverse of `occupancy`: atom_id -> site."""
-        return {int(aid): (int(i), int(j))
-                for (i, j), aid in zip(self.positions, self.atom_ids)}
+        return {
+            int(aid): (int(i), int(j))
+            for (i, j), aid in zip(self.positions, self.atom_ids)
+        }

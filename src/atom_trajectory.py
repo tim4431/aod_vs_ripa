@@ -1,17 +1,16 @@
-"""Per-atom trajectory and the AtomEnsemble that holds the whole timeline.
+"""Per-atom trajectory + the AtomEnsemble that holds the whole timeline.
 
-This module replaces the old "AtomConfig snapshot at every step" model.
-Atom motion is intrinsically asynchronous (RIPA addresses individual
-atoms with independent EOM tones), so the natural representation is one
-`AtomTrajectory` per atom, each carrying a list of timed `Trajectory`
-segments.
+`AtomEnsemble` is the single mutation entry point: every new segment goes
+through `append_segment`, which (a) per-atom continuity, then (b) cross-
+atom collision against existing trajectories — both *before* the segment
+is committed to the addressed `AtomTrajectory`.
 
 `atom_id` is purely an internal index for tracking and visualization. It
 does *not* mark atoms as physically distinguishable; whether atoms are
-distinguishable is a property of the routing problem, not of the atoms.
+distinguishable is a property of the routing problem.
 
 Conventions:
-- Between segments the atom rests at an integer site.
+- Between segments, an atom rests at an integer site.
 - Segments must be contiguous in space (next.start_pos == prev.end_pos)
   and non-overlapping in time (next.start_time >= prev.end_time).
 """
@@ -24,6 +23,30 @@ import numpy as np
 
 from .atom_config import AtomConfig, Grid
 from .segments import Segment
+
+# --- collision report and error --------------------------------------------
+
+
+@dataclass
+class CollisionReport:
+    ok: bool
+    # (candidate_atom_id, other_atom_id, t) at the closest sample.
+    worst_pair: tuple[int, int, float] | None = None
+    worst_distance: float = float("inf")  # in physical um
+
+
+class CollisionError(ValueError):
+    """Raised by `AtomEnsemble.append_segment` when a candidate segment
+    collides with another atom's trajectory; carries the `CollisionReport`
+    so callers can inspect which pair / time triggered the failure."""
+
+    def __init__(self, report: CollisionReport):
+        self.report = report
+        a, b, t = report.worst_pair if report.worst_pair else (-1, -1, 0.0)
+        super().__init__(
+            f"collision: atoms {a} and {b} at t={t:.3e}s, "
+            f"distance={report.worst_distance:.3e}um"
+        )
 
 
 @dataclass
@@ -38,7 +61,6 @@ class AtomTrajectory:
         """Position at global time t. Float during motion, integer at rest."""
         if not self.segments or t <= self.segments[0].start_time:
             return float(self.initial_pos[0]), float(self.initial_pos[1])
-        # Linear scan; segments are short lists in practice.
         last_end_pos = self.initial_pos
         for seg in self.segments:
             if t < seg.start_time:
@@ -70,45 +92,48 @@ class AtomTrajectory:
     def final_time(self) -> float:
         return self.segments[-1].end_time if self.segments else 0.0
 
-    # ---- mutation -----------------------------------------------------------
+    # ---- internal: continuity check ----------------------------------------
 
-    def append(self, segment: Segment) -> None:
-        """Append a segment, validating spatial + temporal continuity."""
-        prev_pos = self.final_pos
-        prev_time = self.final_time
-        if segment.start_pos != prev_pos:
+    def _check_continuity(self, segment: Segment) -> None:
+        """Raise ValueError unless `segment` chains cleanly (start_pos
+        matches the current resting site, start_time at or after the
+        previous segment's end_time). External code mutates via
+        `AtomEnsemble.append_segment`; this method exists so the ensemble
+        can fail-fast on continuity *before* the expensive collision pass.
+        """
+        if segment.start_pos != self.final_pos:
             raise ValueError(
                 f"atom {self.atom_id}: segment starts at {segment.start_pos} "
-                f"but atom is at {prev_pos}"
+                f"but atom is at {self.final_pos}"
             )
-        if segment.start_time + 1e-12 < prev_time:
+        if segment.start_time + 1e-12 < self.final_time:
             raise ValueError(
                 f"atom {self.atom_id}: segment starts at t={segment.start_time} "
-                f"but previous segment ends at t={prev_time}"
+                f"but previous segment ends at t={self.final_time}"
             )
-        self.segments.append(segment)
 
 
 @dataclass
 class AtomEnsemble:
     """Collection of `AtomTrajectory`s sharing one Grid.
 
-    Built from an `AtomConfig` (initial state). Steps mutate this object
-    by appending segments to atoms' trajectories. The list `atoms` is
-    kept in the same order as the source `AtomConfig.positions`; lookup
-    by `atom_id` is via `atom_by_id` (O(1) through the cached id index).
+    Built from an `AtomConfig` (initial state). The only sanctioned way
+    to add motion is `append_segment(atom_id, segment)`, which validates
+    continuity AND cross-atom collisions before committing.
     """
 
     grid: Grid
-    atoms: list[AtomTrajectory] = field(default_factory=list)
+    atomtrajs: list[AtomTrajectory] = field(default_factory=list)
+    # Sample spacing (seconds) used by the collision validator.
+    collision_dt: float = 1e-6
     _id_index: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         self._rebuild_id_index()
 
     def _rebuild_id_index(self) -> None:
-        self._id_index = {a.atom_id: k for k, a in enumerate(self.atoms)}
-        if len(self._id_index) != len(self.atoms):
+        self._id_index = {a.atom_id: k for k, a in enumerate(self.atomtrajs)}
+        if len(self._id_index) != len(self.atomtrajs):
             raise ValueError("AtomEnsemble: atom_ids must be unique")
 
     @classmethod
@@ -121,9 +146,9 @@ class AtomEnsemble:
 
     # ---- queries ------------------------------------------------------------
 
-    def atom_by_id(self, atom_id: int) -> AtomTrajectory:
+    def atomtraj_by_id(self, atom_id: int) -> AtomTrajectory:
         """Look up an atom by its `atom_id` (not by list index)."""
-        return self.atoms[self._id_index[int(atom_id)]]
+        return self.atomtrajs[self._id_index[int(atom_id)]]
 
     def index_of(self, atom_id: int) -> int:
         """List-index of the atom with the given `atom_id`. Useful when
@@ -132,20 +157,19 @@ class AtomEnsemble:
 
     def positions_at(self, t: float) -> np.ndarray:
         """All atom positions at time t, shape (M, 2), in grid units (float)."""
-        return np.array([a.position_at(t) for a in self.atoms], dtype=float)
+        return np.array([a.position_at(t) for a in self.atomtrajs], dtype=float)
 
     def xy_at(self, t: float) -> np.ndarray:
         """All atom positions at time t in physical (um) coords."""
-        c = (self.grid.N - 1) / 2.0
-        return (self.positions_at(t) - c) * self.grid.d
+        return self.grid.ij_to_xy(self.positions_at(t))
 
     def total_duration(self) -> float:
-        return max((a.final_time for a in self.atoms), default=0.0)
+        return max((a.final_time for a in self.atomtrajs), default=0.0)
 
     def occupancy_at_rest(self, t: float) -> dict[tuple[int, int], int]:
         """Map site -> atom_id for atoms at rest at t. Errors on duplicates."""
         occ: dict[tuple[int, int], int] = {}
-        for a in self.atoms:
+        for a in self.atomtrajs:
             site = a.resting_position_at(t)
             if site in occ:
                 raise ValueError(f"two atoms at site {site} at t={t}")
@@ -155,7 +179,82 @@ class AtomEnsemble:
     def final_config(self) -> AtomConfig:
         """Snapshot of final resting positions, preserving atom_ids.
         The returned config does not carry the grid — fetch it from
-        this `AtomEnsemble` (or whoever owns the snapshot) if needed."""
-        positions = np.array([a.final_pos for a in self.atoms], dtype=int)
-        atom_ids = np.array([a.atom_id for a in self.atoms], dtype=int)
+        this `AtomEnsemble` if needed."""
+        positions = np.array([a.final_pos for a in self.atomtrajs], dtype=int)
+        atom_ids = np.array([a.atom_id for a in self.atomtrajs], dtype=int)
         return AtomConfig(positions=positions, atom_ids=atom_ids)
+
+    # ---- collision check (non-mutating) ------------------------------------
+
+    def _check_collision(self, atom_id: int, segment: Segment) -> CollisionReport:
+        """Sample the candidate `segment` against every *other* atom's
+        existing trajectory, and report the worst pairwise distance.
+
+        Older segments don't need to be re-checked against each other —
+        they were validated when each was appended. So the work per
+        appended segment is O(M) sample-passes (one per other atom),
+        not O(M^2). The candidate is read directly from `segment`; the
+        ensemble is not mutated.
+        """
+        if segment.duration <= 0:
+            return CollisionReport(ok=True)
+
+        # dt-spaced samples over the candidate's window, plus boundaries
+        # (already at the endpoints of np.linspace).
+        n = max(2, int(np.ceil(segment.duration / self.collision_dt)) + 1)
+        ts = np.linspace(segment.start_time, segment.end_time, n)
+
+        # Convert grid-unit positions to physical um for the rc check.
+        cand_xy = self.grid.ij_to_xy(
+            np.array([segment.position_at(float(t)) for t in ts])
+        )
+
+        rc = self.grid.rc
+        worst_d = float("inf")
+        worst_pair = None
+        for other in self.atomtrajs:
+            if other.atom_id == atom_id:
+                continue
+            other_xy = self.grid.ij_to_xy(
+                np.array([other.position_at(float(t)) for t in ts])
+            )
+            d = np.linalg.norm(cand_xy - other_xy, axis=1)
+            ti = int(np.argmin(d))
+            d_min = float(d[ti])
+            if d_min < worst_d:
+                worst_d = d_min
+                worst_pair = (int(atom_id), int(other.atom_id), float(ts[ti]))
+
+        return CollisionReport(
+            ok=worst_d >= rc, worst_pair=worst_pair, worst_distance=worst_d
+        )
+
+    def check_segment(self, atom_id: int, segment: Segment) -> CollisionReport:
+        """Non-mutating: would `segment` collide if appended? Also
+        verifies continuity (raises ValueError on continuity failure)."""
+        self.atomtraj_by_id(atom_id)._check_continuity(segment)
+        return self._check_collision(atom_id, segment)
+
+    # ---- mutation -----------------------------------------------------------
+
+    def append_segment(
+        self, atom_id: int, segment: Segment, *, check_collisions: bool = True
+    ) -> None:
+        """Validate then commit a segment to the addressed atom.
+
+        Order:
+          1. Per-atom continuity (cheap) — raises ValueError on failure,
+             so we never run the expensive pass on a malformed segment.
+          2. Cross-atom collision over the candidate's window — uses
+             `collision_dt` for sampling. Raises `CollisionError` on
+             failure; the ensemble is unchanged in that case.
+          3. Commit to `AtomTrajectory.segments`.
+
+        Pass `check_collisions=False` to skip step 2 (e.g. unit tests
+        that intentionally construct overlapping motion).
+        """
+        atomtraj = self.atomtraj_by_id(atom_id)
+        rep = self.check_segment(atom_id, segment)
+        if not rep.ok:
+            raise CollisionError(rep)
+        atomtraj.segments.append(segment)

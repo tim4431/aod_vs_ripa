@@ -607,7 +607,7 @@ def _move_affects_any_atom(move: LatticeMove, ensemble: AtomEnsemble) -> bool:
     sel_r = set(move.old_rows)
     sel_c = set(move.old_cols)
     t = ensemble.total_duration()
-    for atom in ensemble.atoms:
+    for atom in ensemble.atomtrajs:
         i, j = atom.resting_position_at(t)
         if i in sel_r and j in sel_c:
             return True

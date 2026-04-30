@@ -35,15 +35,14 @@ from .atom_config import Grid
 from .atom_trajectory import AtomEnsemble
 from .segments import bang_bang_duration, make_const_acc_segment
 
-
 # --- physical-acceleration ceilings -----------------------------------------
 #
 # Tune these to match the actual hardware. AOD and RIPA are listed
 # separately because per-atom heating / loss budgets can differ even
 # when the trap optics are similar; in many systems they end up equal.
 
-PHYS_A_MAX_AOD: float = 2750.0    # m/s^2 — synchronous AOD lattice ops
-PHYS_A_MAX_RIPA: float = 2750.0   # m/s^2 — RIPA per-atom moves
+PHYS_A_MAX_AOD: float = 2750.0  # m/s^2 — synchronous AOD lattice ops
+PHYS_A_MAX_RIPA: float = 2750.0  # m/s^2 — RIPA per-atom moves
 
 
 def grid_accel_from_phys(phys_a_m_s2: float, grid_d_um: float) -> float:
@@ -111,15 +110,15 @@ class AODStep(Step):
             raise ValueError("selected_cols and new_cols must have the same length")
 
     def _affected(self, ensemble: AtomEnsemble):
-        """Yield (atom, old_site, new_site) for atoms hit by the lattice op."""
+        """Yield (atom_id, old_site, new_site) for atoms hit by the lattice op."""
         row_map = dict(zip(self.selected_rows, self.new_rows))
         col_map = dict(zip(self.selected_cols, self.new_cols))
         sel_r = set(self.selected_rows)
         sel_c = set(self.selected_cols)
-        for atom in ensemble.atoms:
-            i, j = atom.resting_position_at(self.start_time)
+        for atomtraj in ensemble.atomtrajs:
+            i, j = atomtraj.resting_position_at(self.start_time)
             if i in sel_r and j in sel_c:
-                yield atom, (i, j), (row_map[i], col_map[j])
+                yield atomtraj.atom_id, (i, j), (row_map[i], col_map[j])
 
     def _shared_duration(self, ensemble: AtomEnsemble) -> float:
         """Duration of the AOD op = bang-bang time of the longest atom move."""
@@ -135,10 +134,11 @@ class AODStep(Step):
             return  # nobody moves; nothing to record
         # All atoms share the longest move's duration. Shorter moves
         # therefore run with implied accel = 4*L/T**2 < a_max.
-        for atom, start, end in self._affected(ensemble):
-            seg = make_const_acc_segment(start, end, self.start_time,
-                                         duration=T, channel="aod")
-            atom.append(seg)
+        for atom_id, start, end in self._affected(ensemble):
+            seg = make_const_acc_segment(
+                start, end, self.start_time, duration=T, channel="aod"
+            )
+            ensemble.append_segment(atom_id, seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
         return self.start_time + self._shared_duration(ensemble)
@@ -163,9 +163,12 @@ class RIPAStep(Step):
     # grid_units/s^2 override; None -> convert PHYS_A_MAX_RIPA via grid.d.
     a_max: Optional[float] = None
 
-    def _move_for(self, ensemble: AtomEnsemble):
-        atom = ensemble.atom_by_id(self.atom_id)
-        current = atom.resting_position_at(self.start_time)
+    def _current_pos(self, ensemble: AtomEnsemble) -> tuple[int, int]:
+        """Resting site of the addressed atom at `start_time`, with a
+        single-axis check against `channel`."""
+        current = ensemble.atomtraj_by_id(self.atom_id).resting_position_at(
+            self.start_time
+        )
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         if self.channel == "row" and dj != 0:
@@ -176,22 +179,22 @@ class RIPAStep(Step):
             raise ValueError(
                 f"col-channel move must keep i fixed; got {current}->{self.target}"
             )
-        return atom, current
+        return current
 
     def apply(self, ensemble: AtomEnsemble) -> None:
-        atom, current = self._move_for(ensemble)
+        current = self._current_pos(ensemble)
         if current == tuple(self.target):
             return
         # RIPA single-atom move: run at the step's a_max — schedulers
         # can drop a_max on individual steps to slow specific atoms.
         a = _resolve_a_max(self.a_max, ensemble.grid, PHYS_A_MAX_RIPA)
-        seg = make_const_acc_segment(current, tuple(self.target),
-                                     self.start_time,
-                                     accel=a, channel=self.channel)
-        atom.append(seg)
+        seg = make_const_acc_segment(
+            current, tuple(self.target), self.start_time, accel=a, channel=self.channel
+        )
+        ensemble.append_segment(self.atom_id, seg)
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
-        _, current = self._move_for(ensemble)
+        current = self._current_pos(ensemble)
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         L = math.hypot(di, dj)
