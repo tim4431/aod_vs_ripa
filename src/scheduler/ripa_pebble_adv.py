@@ -375,6 +375,8 @@ class PebbleWorkspace:
         start: Site,
         target_sites: set[Site],
         occ: dict[Site, int],
+        *,
+        prefer: Literal["near", "far"] = "far",
     ) -> list[Site] | None:
         goals = self._free_sites(excluding=target_sites, occ=occ)
         if not goals:
@@ -385,7 +387,7 @@ class PebbleWorkspace:
             distance = self._distance_to_set(goal, target_sites)
             by_distance.setdefault(distance, []).append(goal)
 
-        for distance in sorted(by_distance, reverse=True):
+        for distance in sorted(by_distance, reverse=(prefer == "far")):
             path = self._shortest_path_to_any(
                 atom_id,
                 start,
@@ -530,7 +532,9 @@ class RIPAPebbleAdvScheduler(PebbleWorkspace, LabeledScheduler, AsyncScheduler):
                 if occ.get(own_target) is None:
                     path = self._shortest_path(atom_id, site, own_target, occ)
                 if path is None:
-                    path = self._buffer_path(atom_id, site, target_sites, occ)
+                    path = self._buffer_path(
+                        atom_id, site, target_sites, occ, prefer="near"
+                    )
                 if path is None:
                     continue
 

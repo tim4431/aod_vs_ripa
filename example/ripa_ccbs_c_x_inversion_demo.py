@@ -1,4 +1,4 @@
-"""Async-layered C++ CCBS demo for a 6x6 x-inversion.
+"""C++ CCBS x-inversion benchmark/demo for a 6x6 atom array.
 
 The demo places a 6x6 atom array on storage sites inside a larger RIPA grid:
 for the default period=2/margin=1 setup, atoms sit on odd sites of a 13x13
@@ -10,16 +10,20 @@ The full 36-agent one-shot CCBS search is a useful stress case but usually
 times out with the current exact backend.  The default demo therefore performs
 the same labeled inversion as CCBS-planned pair swaps, then launches
 geometrically independent swaps in the same master time layer. Adjacent columns
-share highway lanes, so the async layers use column parity groups.
+share highway lanes, so the async layers use column parity groups. By default
+the GIF compares that async schedule against the serialized version on one
+shared physics clock.
 
 Run:
-    conda run -n claude python example/ripa_ccbs_c_x_inversion_demo.py
+    python example/ripa_ccbs_c_x_inversion_demo.py            # quick check -> render/
+    python example/ripa_ccbs_c_x_inversion_demo.py --demo     # online quality -> demo/
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -28,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.atom_config import Grid
+from src.benchmark import BenchmarkResult, format_benchmark_table
 from src.routing import RoutingRequest, Site
 from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
 from src.moving_sequence import MovingSequence
@@ -219,6 +224,52 @@ def build_staged_x_inversion(
     return master, stage_stats, targets
 
 
+def run_inversion_mode(
+    *,
+    name: str,
+    side: int,
+    period: int,
+    margin: int,
+    time_limit: float,
+    max_high_level_nodes: int,
+    async_layers: bool,
+) -> tuple[BenchmarkResult, list[StageStats]]:
+    started = time.perf_counter()
+    try:
+        sequence, stats, _targets = build_staged_x_inversion(
+            side=side,
+            period=period,
+            margin=margin,
+            time_limit=time_limit,
+            max_high_level_nodes=max_high_level_nodes,
+            async_layers=async_layers,
+        )
+        planning_time = time.perf_counter() - started
+        return (
+            BenchmarkResult(
+                name=name,
+                ok=True,
+                total_time_s=sequence.total_duration(),
+                planning_time_s=planning_time,
+                steps=len(sequence.steps),
+                segments=sum(len(atom.segments) for atom in sequence.ensemble.atomtrajs),
+                clock_cycles=len({stat.layer for stat in stats}),
+                sequence=sequence,
+            ),
+            stats,
+        )
+    except Exception as exc:
+        return (
+            BenchmarkResult(
+                name=name,
+                ok=False,
+                planning_time_s=time.perf_counter() - started,
+                error=exc,
+            ),
+            [],
+        )
+
+
 def try_one_shot(
     *,
     side: int,
@@ -283,7 +334,12 @@ def main() -> None:
     parser.add_argument(
         "--serial",
         action="store_true",
-        help="serialize every pair swap instead of using parity async layers",
+        help="run only the serialized pair-swap schedule",
+    )
+    parser.add_argument(
+        "--async-only",
+        action="store_true",
+        help="run only the async parity-layered schedule",
     )
     parser.add_argument(
         "--try-one-shot",
@@ -295,18 +351,33 @@ def main() -> None:
         action="store_true",
         help="return a non-zero exit code if --try-one-shot does not solve",
     )
-    parser.add_argument("--no-render", action="store_true")
-    parser.add_argument("--quality", choices=("speed", "quality"), default="speed")
-    parser.add_argument("--fps", type=int, default=8)
+    parser.add_argument(
+        "--demo", action="store_true",
+        help="render a high-quality GIF into demo/ instead of a quick render/ check",
+    )
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="print the benchmark table only and skip rendering",
+    )
+    parser.add_argument(
+        "--show-stages",
+        action="store_true",
+        help="also print every CCBS-planned pair-swap stage",
+    )
+    parser.add_argument("--quality", choices=("speed", "quality"), default=None)
+    parser.add_argument("--fps", type=int, default=None)
     parser.add_argument("--time-dilation", type=float, default=1_000.0)
     parser.add_argument("--show-atom-ids", action="store_true")
     parser.add_argument(
         "--output",
         type=Path,
-        default=OUT_DIR / f"{PREFIX}.gif",
+        default=None,
     )
     args = parser.parse_args()
 
+    if args.serial and args.async_only:
+        raise SystemExit("--serial and --async-only are mutually exclusive")
     if args.side % 2 != 0:
         raise SystemExit("x-inversion pair staging requires an even --side")
     if args.period < 1:
@@ -329,45 +400,85 @@ def main() -> None:
                 raise SystemExit(1) from exc
         return
 
-    sequence, stats, _targets = build_staged_x_inversion(
-        side=args.side,
-        period=args.period,
-        margin=args.margin,
-        time_limit=args.time_limit,
-        max_high_level_nodes=args.max_high_level_nodes,
-        async_layers=not args.serial,
-    )
+    if args.serial:
+        modes = [("serial CCBS swaps", False)]
+    elif args.async_only:
+        modes = [("async parity CCBS", True)]
+    else:
+        modes = [
+            ("async parity CCBS", True),
+            ("serial CCBS swaps", False),
+        ]
 
-    layer_count = len({stat.layer for stat in stats})
-    mode = "serial" if args.serial else "async parity-layered"
     print(
-        f"{mode} {args.side}x{args.side} x-inversion on "
-        f"{grid_size(args.side, args.period, args.margin)}x"
-        f"{grid_size(args.side, args.period, args.margin)} RIPA grid"
+        f"N={grid_size(args.side, args.period, args.margin)}, "
+        f"storage_period={args.period}, atoms={args.side * args.side} "
+        f"({args.side}x{args.side}), task=x-inversion (labeled)"
     )
-    print_stage_table(stats)
-    print(
-        f"total_duration_us={sequence.total_duration() * 1e6:.3f}, "
-        f"stages={len(stats)}, layers={layer_count}"
-    )
+    runs = [
+        run_inversion_mode(
+            name=name,
+            side=args.side,
+            period=args.period,
+            margin=args.margin,
+            time_limit=args.time_limit,
+            max_high_level_nodes=args.max_high_level_nodes,
+            async_layers=async_layers,
+        )
+        for name, async_layers in modes
+    ]
+    results = [result for result, _stats in runs]
+    stats_by_name = {
+        result.name: stats
+        for result, stats in runs
+        if result.ok
+    }
+
+    print(format_benchmark_table(results))
+    if args.show_stages:
+        for result in results:
+            if result.ok:
+                print(f"\n{result.name} stages:")
+                print_stage_table(stats_by_name[result.name])
+
+    failures = [result for result in results if not result.ok]
+    if failures:
+        for result in failures:
+            print(f"{result.name} error: {type(result.error).__name__}: {result.error}")
+        raise SystemExit(1)
 
     if args.no_render:
         return
 
+    by_name = {result.name: result.sequence for result in results if result.sequence is not None}
+    panels = {name: by_name[name] for name, _async_layers in modes if name in by_name}
+    if not panels:
+        raise SystemExit("no schedule produced a valid sequence")
+
+    if args.output is not None:
+        out_path = args.output
+    else:
+        out_dir = ROOT / "demo" if args.demo else OUT_DIR
+        suffix = "_serial" if args.serial else "_async" if args.async_only else ""
+        out_path = out_dir / f"{PREFIX}{suffix}.gif"
+
+    quality = args.quality or ("quality" if args.demo else "speed")
+    fps = args.fps or (20 if args.demo else 8)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     render_animation(
-        sequence,
-        args.output,
-        view="demo",
-        quality=args.quality,
-        fps=args.fps,
+        panels,
+        out_path,
+        view="benchmark",
+        quality=quality,
+        fps=fps,
         time_dilation=args.time_dilation,
-        hold_seconds=1.0,
+        hold_seconds=1.5,
         planned_trajectory="next",
         show_atom_ids=args.show_atom_ids,
         show_routing_on_start=True,
-        title=f"C++ CCBS {mode} {args.side}x{args.side} x-inversion",
+        title=f"C++ CCBS x-inversion ({args.side}x{args.side})",
     )
-    print(f"wrote {args.output}")
+    print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":
