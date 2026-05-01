@@ -556,7 +556,6 @@ def render_animation(
     show_routing_on_start: bool = True,
     title: str | None = None,
     show_progress: bool = True,
-    n_workers: int | None = None,
 ) -> Path:
     """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into a GIF.
 
@@ -566,9 +565,8 @@ def render_animation(
       - `fps`: GIF playback frame rate.
     The physics-time step per frame is `1 / (time_dilation * fps)`.
 
-    `n_workers` controls per-frame rendering parallelism: `None` auto-picks
-    `os.cpu_count()`, `1` forces the serial path, and any other value is
-    used as the process-pool size. GIF stitching itself remains serial.
+    Frame rendering is parallelized across `os.cpu_count()` worker
+    processes; GIF stitching itself remains serial.
     """
     if fps <= 0:
         raise ValueError("fps must be positive")
@@ -622,44 +620,26 @@ def render_animation(
     )
 
     items: list[tuple[int, float]] = [(k, float(t)) for k, t in enumerate(schedule)]
-    if n_workers is None:
-        n_workers_eff = min(os.cpu_count() or 1, len(items))
-    else:
-        n_workers_eff = max(1, int(n_workers))
+    n_workers = min(os.cpu_count() or 1, len(items))
 
     with tempfile.TemporaryDirectory(prefix="aod_vs_ripa_frames_") as tmp:
         tmp_path = Path(tmp)
-        if n_workers_eff > 1 and len(items) > 1:
-            chunksize = max(1, len(items) // (n_workers_eff * 4))
-            with ProcessPoolExecutor(
-                max_workers=n_workers_eff,
-                initializer=_frame_worker_init,
-                initargs=(
-                    motion, draw_kwargs, dpi, hold_count,
-                    show_routing_on_start, str(tmp_path),
-                ),
-            ) as ex:
-                results = ex.map(_frame_worker_render, items, chunksize=chunksize)
-                frame_paths = [
-                    Path(p) for p in _progress_iter(
-                        results, total=len(items), desc="render frames",
-                        enabled=show_progress,
-                    )
-                ]
-        else:
-            frame_paths = []
-            for k, t in _progress_iter(
-                items, total=len(items), desc="render frames",
-                enabled=show_progress,
-            ):
-                show_routing = show_routing_on_start and k < hold_count
-                fig, _ = draw_frame(
-                    motion, t, show_routing=show_routing, **draw_kwargs
+        chunksize = max(1, len(items) // (n_workers * 4))
+        with ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_frame_worker_init,
+            initargs=(
+                motion, draw_kwargs, dpi, hold_count,
+                show_routing_on_start, str(tmp_path),
+            ),
+        ) as ex:
+            results = ex.map(_frame_worker_render, items, chunksize=chunksize)
+            frame_paths = [
+                Path(p) for p in _progress_iter(
+                    results, total=len(items), desc="render frames",
+                    enabled=show_progress,
                 )
-                path = tmp_path / f"frame_{k:05d}.png"
-                fig.savefig(path, dpi=dpi, facecolor="white")
-                plt.close(fig)
-                frame_paths.append(path)
+            ]
         _save_gif_from_pngs(frame_paths, out, fps=fps, show_progress=show_progress)
     return out
 
