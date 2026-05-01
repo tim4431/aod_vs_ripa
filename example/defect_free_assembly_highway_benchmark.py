@@ -27,7 +27,7 @@ from src.routing import (
     random_sample_sites,
     storage_subgrid,
 )
-from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
+from src.scheduler.ccbs_c import RIPACCBSCScheduler
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
 from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler

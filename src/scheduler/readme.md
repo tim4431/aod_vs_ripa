@@ -17,8 +17,8 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 | [`RIPAPebbleScheduler`](ripa_pebble.py) | Async | Both | RIPA |
 | [`RIPAPebbleAdvScheduler`](ripa_pebble_adv.py) | Async | Labeled | RIPA |
 | [`UnlabeledRIPAPebbleAdvScheduler`](ripa_pebble_adv.py) | Async | Unlabeled | RIPA |
-| [`RIPACCBSScheduler`](ripa_ccbs.py) | Async | Both | RIPA |
-| [`RIPACCBSCScheduler`](ripa_ccbs_c.py) | Async | Both | RIPA |
+| [`RIPACCBSCScheduler`](ccbs_c/ripa_ccbs_c.py) | Async | Both | RIPA |
+| [`RIPACCBSWindowedScheduler`](ccbs_c/ripa_ccbs_c_windowed.py) | Async | Both | RIPA |
 
 ## Description of the schedulers
 
@@ -32,9 +32,9 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 
 `UnlabeledRIPAPebbleAdvScheduler` is the unlabeled (set→set) sibling of `RIPAPebbleAdvScheduler`. Both share the path-finding and movement-commit primitives via the `PebbleWorkspace` mixin, so the unlabeled scheduler routes on its own workspace rather than delegating to an inner labeled instance. Two routing modes: a staged unlabeled compaction (default, `unlabeled_assignment="min_sum"`) that picks moves greedily from the current occupancy without committing to a fixed pairing, and an assignment-based path (`unlabeled_assignment="min_max"` or when staged compaction is disabled) that solves a Hungarian/bottleneck assignment on path-cost estimates and routes per-atom via the shared `_plan_assigned_routes`.
 
-`RIPACCBSScheduler` builds a finite RIPA route graph and solves a labeled continuous-time MAPF instance via Continuous-time Conflict-Based Search, returning provably collision-free trajectories under the discretization. For unlabeled requests it first picks a source→target assignment by estimated RIPA move duration, then solves the resulting labeled CCBS instance.
+`RIPACCBSCScheduler` builds the RIPA route graph, calls the standalone C++ CCBS backend, and emits the returned timed paths as validated RIPA trajectories. The Python side is only solver IO plus trajectory translation; the CCBS/SIPP search lives in C++.
 
-`RIPACCBSCScheduler` is a thin wrapper around `RIPACCBSScheduler` that hands the labeled CCBS instance (route graph + start/goal pairs) to a C++ backend instead of the Python solver, trading implementation simplicity for substantially faster high-level search.
+`RIPACCBSWindowedScheduler` is an experimental decomposed wrapper around the C++ backend. For labeled single-axis reciprocal swap permutations, such as row/column inversions, it groups small nested swap windows before calling CCBS so local asynchronous overlap can be discovered; symmetric windows are translated across identical rows/columns, hard windows fall back to pairwise CCBS, and unsupported requests fall back to `RIPACCBSCScheduler`.
 
 ## Search and benchmarking helpers
 
