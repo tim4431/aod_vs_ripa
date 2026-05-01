@@ -56,6 +56,7 @@ class CCBSGraph:
 
     coords: dict[NodeId, Point] = field(default_factory=dict)
     edges: dict[NodeId, dict[NodeId, float]] = field(default_factory=dict)
+    motion_profile: str = "linear"
 
     def add_node(self, node: NodeId, coord: Point) -> None:
         self.coords[int(node)] = (float(coord[0]), float(coord[1]))
@@ -428,12 +429,14 @@ class ContinuousCBSRaw:
         precision: float = 1e-6,
         time_limit: float = 30.0,
         max_high_level_nodes: int = 10000,
+        high_level_order: str = "cost",
     ):
         self.graph = graph
         self.agents = list(agents)
         self.precision = float(precision)
         self.time_limit = float(time_limit)
         self.max_high_level_nodes = int(max_high_level_nodes)
+        self.high_level_order = high_level_order
         self.low_level = RawSIPP(graph)
 
     def find_solution(self) -> CCBSSolution:
@@ -461,8 +464,8 @@ class ContinuousCBSRaw:
         )
         root.conflicts = tuple(self.get_all_conflicts(root.paths))
 
-        open_heap: list[tuple[float, int, int, _CTNode]] = []
-        heapq.heappush(open_heap, (root.cost, len(root.conflicts), root.id, root))
+        open_heap: list[tuple[float, float, int, _CTNode]] = []
+        heapq.heappush(open_heap, (*self._heap_key(root), root))
         generated = 1
         expanded = 0
         seen: set[frozenset[CCBSConstraint]] = {frozenset()}
@@ -529,10 +532,7 @@ class ContinuousCBSRaw:
                     conflicts=child_conflicts,
                 )
                 generated += 1
-                heapq.heappush(
-                    open_heap,
-                    (child.cost, len(child.conflicts), child.id, child),
-                )
+                heapq.heappush(open_heap, (*self._heap_key(child), child))
 
         return CCBSSolution(
             found=False,
@@ -541,6 +541,11 @@ class ContinuousCBSRaw:
             low_level_expanded=low_expanded,
             elapsed=time.monotonic() - started,
         )
+
+    def _heap_key(self, node: _CTNode) -> tuple[float, float, int]:
+        if self.high_level_order == "conflicts":
+            return (float(len(node.conflicts)), node.cost, node.id)
+        return (node.cost, float(len(node.conflicts)), node.id)
 
     def get_all_conflicts(
         self,
@@ -692,6 +697,9 @@ def collision_interval(
 ) -> tuple[float, float, float] | None:
     """Return `(enter, exit, closest_time)` if two timed moves collide."""
 
+    if graph.motion_profile != "linear":
+        return profiled_collision_interval(graph, move_a, move_b, radius_sum)
+
     t0 = max(move_a.t1, move_b.t1)
     t1 = min(move_a.t2, move_b.t2)
     if t1 < t0 - EPS:
@@ -741,16 +749,225 @@ def collision_interval(
     return t0 + enter, t0 + exit_, closest_t
 
 
+def profiled_collision_interval(
+    graph: CCBSGraph,
+    move_a: TimedMove,
+    move_b: TimedMove,
+    radius_sum: float,
+) -> tuple[float, float, float] | None:
+    """Numerical collision interval for nonlinear edge profiles.
+
+    The original CCBS implementation has a closed form for constant-velocity
+    disks. RIPA legs use a bang-bang profile, so this routine finds the first
+    collision interval by bounded one-dimensional minimization over the
+    overlap window. It is intentionally conservative enough for scheduler
+    debugging, while still returning finite unsafe intervals for CBS/SIPP.
+    """
+
+    t0 = max(move_a.t1, move_b.t1)
+    t1 = min(move_a.t2, move_b.t2)
+    if t1 < t0 - EPS:
+        return None
+
+    if bbox_distance(move_bbox(graph, move_a), move_bbox(graph, move_b)) > radius_sum + EPS:
+        return None
+
+    r2 = radius_sum * radius_sum
+    if math.isinf(t1):
+        d2 = distance2_at(graph, move_a, move_b, t0)
+        if d2 <= r2 + EPS:
+            return t0, INF, t0
+        return None
+
+    if t1 <= t0 + EPS:
+        d2 = distance2_at(graph, move_a, move_b, t0)
+        if d2 <= r2 + EPS:
+            return t0, t1, t0
+        return None
+
+    points = collision_breakpoints(move_a, move_b, t0, t1)
+    for lo, hi in zip(points, points[1:]):
+        if hi < lo + EPS:
+            continue
+        best_t, best_d2 = golden_min_distance2(graph, move_a, move_b, lo, hi)
+        endpoint_candidates = [
+            (lo, distance2_at(graph, move_a, move_b, lo)),
+            (hi, distance2_at(graph, move_a, move_b, hi)),
+            (best_t, best_d2),
+        ]
+        best_t, best_d2 = min(endpoint_candidates, key=lambda item: item[1])
+        if best_d2 > r2 + EPS:
+            continue
+
+        left = collision_boundary(
+            graph,
+            move_a,
+            move_b,
+            lo,
+            best_t,
+            r2,
+            want_left=True,
+        )
+        right = collision_boundary(
+            graph,
+            move_a,
+            move_b,
+            best_t,
+            hi,
+            r2,
+            want_left=False,
+        )
+        return left, right, best_t
+
+    return None
+
+
+def collision_breakpoints(
+    move_a: TimedMove,
+    move_b: TimedMove,
+    t0: float,
+    t1: float,
+) -> list[float]:
+    points = {float(t0), float(t1)}
+    for move in (move_a, move_b):
+        if move.is_wait or math.isinf(move.t2):
+            continue
+        for t in (move.t1, 0.5 * (move.t1 + move.t2), move.t2):
+            if t0 < t < t1:
+                points.add(float(t))
+
+    # Extra cuts keep the quartic-ish bang-bang distance curve tame enough for
+    # golden search on each subinterval.
+    span = t1 - t0
+    for k in range(1, 9):
+        points.add(float(t0 + span * k / 9.0))
+    return sorted(points)
+
+
+def move_bbox(graph: CCBSGraph, move: TimedMove) -> tuple[float, float, float, float]:
+    p0 = graph.coord(move.u)
+    p1 = graph.coord(move.v)
+    return (
+        min(p0[0], p1[0]),
+        max(p0[0], p1[0]),
+        min(p0[1], p1[1]),
+        max(p0[1], p1[1]),
+    )
+
+
+def bbox_distance(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    dx = max(b[0] - a[1], a[0] - b[1], 0.0)
+    dy = max(b[2] - a[3], a[2] - b[3], 0.0)
+    return math.hypot(dx, dy)
+
+
+def golden_min_distance2(
+    graph: CCBSGraph,
+    move_a: TimedMove,
+    move_b: TimedMove,
+    lo: float,
+    hi: float,
+) -> tuple[float, float]:
+    if hi <= lo + EPS:
+        return lo, distance2_at(graph, move_a, move_b, lo)
+
+    phi = (math.sqrt(5.0) - 1.0) / 2.0
+    x1 = hi - phi * (hi - lo)
+    x2 = lo + phi * (hi - lo)
+    f1 = distance2_at(graph, move_a, move_b, x1)
+    f2 = distance2_at(graph, move_a, move_b, x2)
+    tol = max(EPS, (hi - lo) * 1e-9)
+
+    for _ in range(64):
+        if hi - lo <= tol:
+            break
+        if f1 <= f2:
+            hi = x2
+            x2 = x1
+            f2 = f1
+            x1 = hi - phi * (hi - lo)
+            f1 = distance2_at(graph, move_a, move_b, x1)
+        else:
+            lo = x1
+            x1 = x2
+            f1 = f2
+            x2 = lo + phi * (hi - lo)
+            f2 = distance2_at(graph, move_a, move_b, x2)
+
+    candidates = [
+        (lo, distance2_at(graph, move_a, move_b, lo)),
+        (hi, distance2_at(graph, move_a, move_b, hi)),
+        (x1, f1),
+        (x2, f2),
+    ]
+    return min(candidates, key=lambda item: item[1])
+
+
+def collision_boundary(
+    graph: CCBSGraph,
+    move_a: TimedMove,
+    move_b: TimedMove,
+    safe_side: float,
+    colliding_side: float,
+    r2: float,
+    *,
+    want_left: bool,
+) -> float:
+    if distance2_at(graph, move_a, move_b, safe_side) <= r2 + EPS:
+        return safe_side
+    lo = min(safe_side, colliding_side)
+    hi = max(safe_side, colliding_side)
+    for _ in range(64):
+        mid = 0.5 * (lo + hi)
+        collides = distance2_at(graph, move_a, move_b, mid) <= r2 + EPS
+        if want_left:
+            if collides:
+                hi = mid
+            else:
+                lo = mid
+        else:
+            if collides:
+                lo = mid
+            else:
+                hi = mid
+    return hi if want_left else lo
+
+
+def distance2_at(
+    graph: CCBSGraph,
+    move_a: TimedMove,
+    move_b: TimedMove,
+    t: float,
+) -> float:
+    pa = position_at(graph, move_a, t)
+    pb = position_at(graph, move_b, t)
+    dx = pa[0] - pb[0]
+    dy = pa[1] - pb[1]
+    return dx * dx + dy * dy
+
+
 def position_at(graph: CCBSGraph, move: TimedMove, t: float) -> Point:
     p0 = graph.coord(move.u)
     if move.is_wait or move.t2 <= move.t1 + EPS or math.isinf(move.t2):
         return p0
     p1 = graph.coord(move.v)
-    alpha = min(1.0, max(0.0, (t - move.t1) / (move.t2 - move.t1)))
+    alpha = move_fraction(graph, move, t)
     return (
         p0[0] + alpha * (p1[0] - p0[0]),
         p0[1] + alpha * (p1[1] - p0[1]),
     )
+
+
+def move_fraction(graph: CCBSGraph, move: TimedMove, t: float) -> float:
+    alpha = min(1.0, max(0.0, (t - move.t1) / (move.t2 - move.t1)))
+    if graph.motion_profile == "bang_bang":
+        if alpha <= 0.5:
+            return 2.0 * alpha * alpha
+        return 1.0 - 2.0 * (1.0 - alpha) * (1.0 - alpha)
+    return alpha
 
 
 def velocity(graph: CCBSGraph, move: TimedMove) -> Point:

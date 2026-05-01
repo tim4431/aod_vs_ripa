@@ -41,20 +41,25 @@ OUT_DIR = ROOT / "render"
 PREFIX = "defect_free_assembly_ccbs"
 
 
-def make_request() -> RoutingRequest:
-    grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
-    target_atom_count = TARGET_SIDE * TARGET_SIDE
-    src = stochastically_loaded_sites(N, target_atom_count, SEED)
-    dst = centered_square_targets(N, TARGET_SIDE)
+def make_request(
+    *,
+    N_: int = N,
+    target_side: int = TARGET_SIDE,
+    seed: int = SEED,
+) -> RoutingRequest:
+    grid = Grid(N=N_, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
+    target_atom_count = target_side * target_side
+    src = stochastically_loaded_sites(N_, target_atom_count, seed)
+    dst = centered_square_targets(N_, target_side)
     return RoutingRequest(grid=grid, src=src, dst=dst, labeled=False)
 
 
-def scheduler_factories():
+def scheduler_factories(*, ccbs_time_limit: float):
     return {
         "ripa_ccbs": lambda req: RIPACCBSScheduler(
             req,
             collision_dt=COLLISION_DT,
-            time_limit=30.0,
+            time_limit=ccbs_time_limit,
             max_high_level_nodes=20_000,
         ),
         "aod_sqrt_time": lambda req: SqrtTimeAODScheduler(
@@ -101,14 +106,19 @@ def plot_benchmark(
     plt.close(fig)
 
 
-def render_ccbs_outputs(sequence: Sequence, request: RoutingRequest) -> None:
+def render_ccbs_outputs(
+    sequence: Sequence,
+    request: RoutingRequest,
+    *,
+    target_side: int,
+) -> None:
     render_check_outputs(
         sequence,
         OUT_DIR,
         PREFIX,
         static_traps=request.dst,
         view="demo",
-        title_prefix=f"RIPA CCBS defect-free assembly - target {TARGET_SIDE}x{TARGET_SIDE}",
+        title_prefix=f"RIPA CCBS defect-free assembly - target {target_side}x{target_side}",
         gif_fps=6,
         gif_time_dilation=3e4,
         gif_hold_seconds=1.5,
@@ -123,18 +133,37 @@ def main() -> None:
         action="store_true",
         help="skip PNG/GIF rendering and only print the benchmark table",
     )
+    parser.add_argument("--N", type=int, default=N, help="grid side length")
+    parser.add_argument(
+        "--target-side",
+        type=int,
+        default=TARGET_SIDE,
+        help="side length of the centered target square",
+    )
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument(
+        "--ccbs-time-limit",
+        type=float,
+        default=30.0,
+        help="CCBS planning time limit in seconds",
+    )
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    request = make_request()
+    request = make_request(
+        N_=args.N,
+        target_side=args.target_side,
+        seed=args.seed,
+    )
     print(
-        f"seed={SEED}, N={N}, loaded={len(request.src)} atoms "
-        f"({len(request.src) / (N * N):.1%}), target={TARGET_SIDE}x{TARGET_SIDE}"
+        f"seed={args.seed}, N={args.N}, loaded={len(request.src)} atoms "
+        f"({len(request.src) / (args.N * args.N):.1%}), "
+        f"target={args.target_side}x{args.target_side}"
     )
 
     results = benchmark_schedulers(
         request,
-        scheduler_factories(),
+        scheduler_factories(ccbs_time_limit=args.ccbs_time_limit),
         validate_dt=COLLISION_DT,
     )
     print(format_benchmark_table(results))
@@ -153,7 +182,11 @@ def main() -> None:
             OUT_DIR / f"{PREFIX}_benchmark.png",
             list(request.dst),
         )
-        render_ccbs_outputs(ccbs.sequence, request)
+        render_ccbs_outputs(
+            ccbs.sequence,
+            request,
+            target_side=args.target_side,
+        )
 
 
 if __name__ == "__main__":

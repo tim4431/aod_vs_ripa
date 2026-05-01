@@ -46,6 +46,139 @@ class _RIPACCBSMove:
 
 
 @dataclass(frozen=True)
+class _RIPACCBSSegmentSpec:
+    atom_id: int
+    start: Site
+    end: Site
+    start_time: float
+    channel: Channel
+
+
+@dataclass(frozen=True)
+class _RIPACCBSPlanStep(Step):
+    """Whole CCBS plan as one mutation.
+
+    The sequence API validates incrementally, but CCBS plans may require an atom
+    to enter a site after another atom's future departure. Appending such moves
+    one by one falsely treats the future mover as a permanent blocker. This
+    step installs all planned RIPA segments together and validates the complete
+    timeline before leaving the ensemble mutated.
+    """
+
+    segments: tuple[_RIPACCBSSegmentSpec, ...]
+    start_time: float = 0.0
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        by_atom: dict[int, list[Segment]] = {}
+
+        for spec in self.segments:
+            self._check_axis(spec.start, spec.end, spec.channel)
+            segment = make_const_acc_segment(
+                spec.start,
+                spec.end,
+                spec.start_time,
+                accel=accel,
+                channel=spec.channel,
+            )
+            by_atom.setdefault(int(spec.atom_id), []).append(segment)
+
+        for atom_id, segments in by_atom.items():
+            segments.sort(key=lambda seg: seg.start_time)
+            atom = ensemble.atomtraj_by_id(atom_id)
+            pos = atom.final_pos
+            t = atom.final_time
+            for segment in segments:
+                if segment.start_pos != pos:
+                    raise ValueError(
+                        f"atom {atom_id}: segment starts at {segment.start_pos} "
+                        f"but atom is at {pos}"
+                    )
+                if segment.start_time + 1e-12 < t:
+                    raise ValueError(
+                        f"atom {atom_id}: segment starts at t={segment.start_time} "
+                        f"before previous segment ends at t={t}"
+                    )
+                pos = segment.end_pos
+                t = segment.end_time
+
+        old_lengths = {
+            atom.atom_id: len(atom.segments)
+            for atom in ensemble.atomtrajs
+        }
+        try:
+            for atom_id, segments in by_atom.items():
+                ensemble.atomtraj_by_id(atom_id).segments.extend(segments)
+            report = self._check_full_timeline(ensemble)
+            if not report.ok:
+                raise CollisionError(report)
+        except Exception:
+            for atom in ensemble.atomtrajs:
+                del atom.segments[old_lengths[atom.atom_id] :]
+            raise
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        latest = self.start_time
+        for spec in self.segments:
+            distance = math.hypot(spec.end[0] - spec.start[0], spec.end[1] - spec.start[1])
+            latest = max(latest, spec.start_time + bang_bang_duration(distance, accel))
+        return latest
+
+    @staticmethod
+    def _check_axis(start: Site, end: Site, channel: Channel) -> None:
+        if channel == "row" and start[1] != end[1]:
+            raise ValueError(f"row-channel move must keep j fixed: {start}->{end}")
+        if channel == "col" and start[0] != end[0]:
+            raise ValueError(f"col-channel move must keep i fixed: {start}->{end}")
+        if start != end and start[0] != end[0] and start[1] != end[1]:
+            raise ValueError(f"RIPA CCBS move must be single-axis: {start}->{end}")
+
+    @staticmethod
+    def _check_full_timeline(ensemble: AtomEnsemble) -> CollisionReport:
+        rc_grid = ensemble.grid.rc / ensemble.grid.d
+        horizon = ensemble.total_duration()
+        worst_grid = math.inf
+        worst_pair: tuple[int, int, float] | None = None
+
+        atoms = ensemble.atomtrajs
+        for idx, atom_a in enumerate(atoms):
+            for atom_b in atoms[idx + 1 :]:
+                for seg_a in atom_a.timeline_segments(0.0, horizon):
+                    if seg_a.duration <= 0:
+                        continue
+                    for seg_b in atom_b.timeline_segments(
+                        seg_a.start_time,
+                        seg_a.end_time,
+                    ):
+                        t0 = max(seg_a.start_time, seg_b.start_time)
+                        t1 = min(seg_a.end_time, seg_b.end_time)
+                        if t1 < t0 - 1e-12:
+                            continue
+                        d_grid, t = ensemble._distance_between_segments(
+                            seg_a,
+                            seg_b,
+                            t0,
+                            t1,
+                            rc_grid,
+                        )
+                        if d_grid < worst_grid:
+                            worst_grid = d_grid
+                            worst_pair = (
+                                int(atom_a.atom_id),
+                                int(atom_b.atom_id),
+                                float(t),
+                            )
+
+        worst_um = worst_grid * ensemble.grid.d
+        return CollisionReport(
+            ok=worst_um + 1e-12 >= ensemble.grid.rc,
+            worst_pair=worst_pair,
+            worst_distance=worst_um,
+        )
+
+
+@dataclass(frozen=True)
 class _RIPACCBSBatchStep(Step):
     """Same-start RIPA batch used when CCBS schedules simultaneous moves.
 
@@ -179,6 +312,7 @@ class RIPACCBSScheduler(AsyncScheduler):
     graph_mode: GraphMode = "all_axis"
     time_limit: float = 30.0
     max_high_level_nodes: int = 10000
+    high_level_order: str = "cost"
     ccbs_precision: float | None = None
     max_exact_unlabeled_atoms: int = 12
     same_time_tol: float = 1e-10
@@ -267,6 +401,7 @@ class RIPACCBSScheduler(AsyncScheduler):
             precision=precision,
             time_limit=self.time_limit,
             max_high_level_nodes=self.max_high_level_nodes,
+            high_level_order=self.high_level_order,
         )
         solution = solver.find_solution()
         self.ccbs_solution = solution
@@ -284,6 +419,7 @@ class RIPACCBSScheduler(AsyncScheduler):
 
     def _build_graph(self) -> CCBSGraph:
         graph = CCBSGraph()
+        graph.motion_profile = "bang_bang"
         self._node_to_site.clear()
         self._site_to_node.clear()
 
@@ -380,27 +516,24 @@ class RIPACCBSScheduler(AsyncScheduler):
     # ---- solution emission -------------------------------------------------
 
     def _emit_solution(self, solution: CCBSSolution) -> None:
-        move_items: list[tuple[float, int, int, TimedMove]] = []
+        segment_specs: list[_RIPACCBSSegmentSpec] = []
         for ccbs_agent_id, path in solution.paths.items():
             atom_id = self._ccbs_agent_to_atom_id[int(ccbs_agent_id)]
             for order, move in enumerate(path.moves(include_final_hold=False)):
                 if move.u == move.v:
                     continue
-                move_items.append((move.t1, int(atom_id), order, move))
-
-        move_items.sort(key=lambda item: (item[0], item[1], item[2]))
-        for group in self._same_time_groups(move_items):
-            start_time = group[0][0]
-            batch_moves = tuple(
-                _RIPACCBSMove(
-                    atom_id=atom_id,
-                    target=self._node_to_site[move.v],
-                    channel=self._channel_for_move(move),
+                segment_specs.append(
+                    _RIPACCBSSegmentSpec(
+                        atom_id=int(atom_id),
+                        start=self._node_to_site[move.u],
+                        end=self._node_to_site[move.v],
+                        start_time=float(move.t1),
+                        channel=self._channel_for_move(move),
+                    )
                 )
-                for _, atom_id, _, move in group
-            )
-            step = _RIPACCBSBatchStep(start_time=start_time, moves=batch_moves)
-            self.append_step(step)
+        if segment_specs:
+            segment_specs.sort(key=lambda spec: (spec.start_time, spec.atom_id, spec.end))
+            self.append_step(_RIPACCBSPlanStep(tuple(segment_specs)))
 
     def _same_time_groups(
         self,
