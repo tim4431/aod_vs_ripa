@@ -15,8 +15,8 @@ from typing import Iterable
 from ...moving_sequence import MovingSequence
 from ...movement import Step
 from ...routing import RoutingRequest, Site
-from ..ccbs_c.continuous_cbs_translated import CCBSSolution
 from ..ripa_ccbs_c import RIPACCBSCScheduler
+from ..ripa_ccbs_common import CCBSSolution
 
 Axis = int
 Swap = tuple[int, int]
@@ -351,7 +351,6 @@ class RIPACCBSDWindowedScheduler(RIPACCBSCScheduler):
             high_level_order=self.high_level_order,
             ccbs_precision=self.ccbs_precision,
             max_exact_unlabeled_atoms=self.max_exact_unlabeled_atoms,
-            same_time_tol=self.same_time_tol,
             freeze_initial_target_atoms=True,
             solver_path=self.solver_path,
             rebuild_solver=self.rebuild_solver,

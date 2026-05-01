@@ -1,16 +1,8 @@
-"""RIPA scheduler backed by the raw Continuous-CBS reference solver.
+"""Shared RIPA adapter pieces for CCBS-style schedulers.
 
-This is a bridge between `continuous_cbs_raw.py` and the repo's scheduler API.
-It builds a finite RIPA route graph, solves a labeled continuous-time MAPF
-instance with `ContinuousCBSRaw`, and emits the resulting timed path as
-`RIPAStep`-compatible motion.
-
-Important limitation: the raw CCBS solver uses constant-velocity segment
-collision math, while the emitted RIPA moves use the simulator's bang-bang
-profiles. The final `Sequence` append/validation is still authoritative, so a
-raw CCBS solution that is safe in the reference model but unsafe under RIPA
-physics will fail during emission. This file is therefore a first working
-adapter, not the final RIPA-native CCBS.
+This module intentionally contains no CBS search. It owns only the RIPA-facing
+data model, route graph construction, target assignment, and conversion from a
+timed node path into validated RIPA bang-bang trajectories.
 """
 
 from __future__ import annotations
@@ -18,31 +10,127 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Iterable, Literal
+from typing import Literal
 
 from ..atom_trajectory import AtomEnsemble, CollisionError, CollisionReport
 from ..movement import PHYS_A_MAX_RIPA, Step, grid_accel_from_phys
 from ..routing import Site
 from ..segments import Segment, bang_bang_duration, make_const_acc_segment
 from .base import AsyncScheduler
-from .ccbs_c.continuous_cbs_translated import (
-    CCBSAgent,
-    CCBSGraph,
-    CCBSSolution,
-    ContinuousCBSRaw,
-    TimedMove,
-    TimedPath,
-)
 
+NodeId = int
+Point = tuple[float, float]
 Channel = Literal["row", "col"]
 GraphMode = Literal["all_axis", "adjacent"]
 
+EPS = 1e-9
+INF = math.inf
+
 
 @dataclass(frozen=True)
-class _RIPACCBSMove:
-    atom_id: int
-    target: Site
-    channel: Channel
+class CCBSAgent:
+    """One labeled finite-radius agent for a CCBS backend."""
+
+    start: NodeId
+    goal: NodeId
+    radius: float = math.sqrt(2.0) / 4.0
+
+
+@dataclass
+class CCBSGraph:
+    """Finite geometric graph passed to a CCBS backend."""
+
+    coords: dict[NodeId, Point] = field(default_factory=dict)
+    edges: dict[NodeId, dict[NodeId, float]] = field(default_factory=dict)
+
+    def add_node(self, node: NodeId, coord: Point) -> None:
+        self.coords[int(node)] = (float(coord[0]), float(coord[1]))
+        self.edges.setdefault(int(node), {})
+
+    def add_edge(
+        self,
+        u: NodeId,
+        v: NodeId,
+        duration: float | None = None,
+        *,
+        bidirectional: bool = True,
+    ) -> None:
+        u = int(u)
+        v = int(v)
+        if u not in self.coords or v not in self.coords:
+            raise KeyError(f"both edge endpoints must be nodes, got {u}->{v}")
+        if duration is None:
+            duration = math.hypot(
+                self.coords[v][0] - self.coords[u][0],
+                self.coords[v][1] - self.coords[u][1],
+            )
+        if duration <= 0:
+            raise ValueError("edge duration must be positive")
+        self.edges.setdefault(u, {})[v] = float(duration)
+        if bidirectional:
+            self.edges.setdefault(v, {})[u] = float(duration)
+
+
+@dataclass(frozen=True)
+class TimedState:
+    node: NodeId
+    time: float
+
+
+@dataclass(frozen=True)
+class TimedMove:
+    """A timed graph action returned by a CCBS backend."""
+
+    u: NodeId
+    v: NodeId
+    t1: float
+    t2: float
+
+    @property
+    def is_wait(self) -> bool:
+        return self.u == self.v
+
+    @property
+    def duration(self) -> float:
+        return self.t2 - self.t1
+
+
+@dataclass
+class TimedPath:
+    agent: int
+    states: tuple[TimedState, ...]
+    expanded: int = 0
+
+    @property
+    def cost(self) -> float:
+        return self.states[-1].time if self.states else INF
+
+    @property
+    def makespan(self) -> float:
+        return self.cost
+
+    def moves(self, *, include_final_hold: bool = True) -> list[TimedMove]:
+        result: list[TimedMove] = []
+        for a, b in zip(self.states, self.states[1:]):
+            if b.time <= a.time + EPS:
+                continue
+            result.append(TimedMove(a.node, b.node, a.time, b.time))
+        if include_final_hold and self.states:
+            last = self.states[-1]
+            result.append(TimedMove(last.node, last.node, last.time, INF))
+        return result
+
+
+@dataclass
+class CCBSSolution:
+    found: bool
+    paths: dict[int, TimedPath] = field(default_factory=dict)
+    flowtime: float = INF
+    makespan: float = INF
+    high_level_expanded: int = 0
+    high_level_generated: int = 0
+    low_level_expanded: int = 0
+    elapsed: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -56,14 +144,7 @@ class _RIPACCBSSegmentSpec:
 
 @dataclass(frozen=True)
 class _RIPACCBSPlanStep(Step):
-    """Whole CCBS plan as one mutation.
-
-    The sequence API validates incrementally, but CCBS plans may require an atom
-    to enter a site after another atom's future departure. Appending such moves
-    one by one falsely treats the future mover as a permanent blocker. This
-    step installs all planned RIPA segments together and validates the complete
-    timeline before leaving the ensemble mutated.
-    """
+    """Whole CCBS plan as one mutation."""
 
     segments: tuple[_RIPACCBSSegmentSpec, ...]
     start_time: float = 0.0
@@ -121,7 +202,10 @@ class _RIPACCBSPlanStep(Step):
         accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
         latest = self.start_time
         for spec in self.segments:
-            distance = math.hypot(spec.end[0] - spec.start[0], spec.end[1] - spec.start[1])
+            distance = math.hypot(
+                spec.end[0] - spec.start[0],
+                spec.end[1] - spec.start[1],
+            )
             latest = max(latest, spec.start_time + bang_bang_duration(distance, accel))
         return latest
 
@@ -178,136 +262,9 @@ class _RIPACCBSPlanStep(Step):
         )
 
 
-@dataclass(frozen=True)
-class _RIPACCBSBatchStep(Step):
-    """Same-start RIPA batch used when CCBS schedules simultaneous moves.
-
-    `Sequence.append_sync_batch()` currently appends one `RIPAStep` at a time,
-    which can falsely reject swaps or simultaneous vacancy moves. This batch
-    step validates all candidate segments together through
-    `AtomEnsemble.append_segments_batch()`, while also checking each atom's
-    pre-wait and post-hold against already committed trajectories.
-    """
-
-    start_time: float
-    moves: tuple[_RIPACCBSMove, ...]
-
-    def apply(self, ensemble: AtomEnsemble) -> None:
-        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
-        candidates: list[tuple[int, Segment]] = []
-
-        for move in self.moves:
-            current = ensemble.atomtraj_by_id(move.atom_id).resting_position_at(
-                self.start_time
-            )
-            self._check_axis(current, move.target, move.channel)
-            if current == tuple(move.target):
-                continue
-            candidates.append(
-                (
-                    int(move.atom_id),
-                    make_const_acc_segment(
-                        current,
-                        tuple(move.target),
-                        self.start_time,
-                        accel=accel,
-                        channel=move.channel,
-                    ),
-                )
-            )
-
-        if not candidates:
-            return
-
-        report = self._check_batch_timeline(ensemble, dict(candidates))
-        if not report.ok:
-            raise CollisionError(report)
-        ensemble.append_segments_batch(candidates)
-
-    def end_time(self, ensemble: AtomEnsemble) -> float:
-        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
-        latest = self.start_time
-        for move in self.moves:
-            current = ensemble.atomtraj_by_id(move.atom_id).resting_position_at(
-                self.start_time
-            )
-            self._check_axis(current, move.target, move.channel)
-            distance = math.hypot(move.target[0] - current[0], move.target[1] - current[1])
-            latest = max(latest, self.start_time + bang_bang_duration(distance, accel))
-        return latest
-
-    @staticmethod
-    def _check_axis(start: Site, end: Site, channel: Channel) -> None:
-        if channel == "row" and start[1] != end[1]:
-            raise ValueError(f"row-channel move must keep j fixed: {start}->{end}")
-        if channel == "col" and start[0] != end[0]:
-            raise ValueError(f"col-channel move must keep i fixed: {start}->{end}")
-        if start != end and start[0] != end[0] and start[1] != end[1]:
-            raise ValueError(f"RIPA CCBS move must be single-axis: {start}->{end}")
-
-    @staticmethod
-    def _check_batch_timeline(
-        ensemble: AtomEnsemble,
-        candidates: dict[int, Segment],
-    ) -> CollisionReport:
-        """Validate candidate moves plus their induced waits as one timeline."""
-
-        for atom_id, segment in candidates.items():
-            ensemble.atomtraj_by_id(atom_id)._check_continuity(segment)
-
-        rc_grid = ensemble.grid.rc / ensemble.grid.d
-        horizon = max(
-            ensemble.total_duration(),
-            max((segment.end_time for segment in candidates.values()), default=0.0),
-        )
-        worst_grid = math.inf
-        worst_pair: tuple[int, int, float] | None = None
-
-        for atom_id, candidate in candidates.items():
-            atom = ensemble.atomtraj_by_id(atom_id)
-            start_time = atom.final_time
-            for segment in atom.timeline_segments(
-                start_time,
-                horizon,
-                candidate=candidate,
-            ):
-                if segment.duration <= 0:
-                    continue
-                for other in ensemble.atomtrajs:
-                    other_id = int(other.atom_id)
-                    if other_id == atom_id:
-                        continue
-                    d_grid, t = ensemble._min_distance_to_atom(
-                        segment,
-                        other,
-                        candidates.get(other_id),
-                        rc_grid,
-                    )
-                    if d_grid < worst_grid:
-                        worst_grid = d_grid
-                        worst_pair = (atom_id, other_id, float(t))
-
-        worst_um = worst_grid * ensemble.grid.d
-        return CollisionReport(
-            ok=worst_um + 1e-12 >= ensemble.grid.rc,
-            worst_pair=worst_pair,
-            worst_distance=worst_um,
-        )
-
-
 @dataclass
-class RIPACCBSScheduler(AsyncScheduler):
-    """Continuous-CBS-backed RIPA scheduler.
-
-    The scheduler supports labeled and unlabeled `RoutingRequest`s. For
-    unlabeled requests it first chooses a source-target assignment by estimated
-    RIPA move duration, then solves the resulting labeled CCBS instance.
-
-    `graph_mode="all_axis"` gives CCBS one macro edge between every pair of
-    sites sharing a row or column. This matches RIPA's long-leg primitive better
-    than adjacent grid moves. `graph_mode="adjacent"` is slower but useful as a
-    conservative debugging mode.
-    """
+class RIPACCBSBaseScheduler(AsyncScheduler):
+    """Shared RIPA graph/assignment/emission layer for CCBS backends."""
 
     graph_mode: GraphMode = "all_axis"
     time_limit: float = 30.0
@@ -315,7 +272,6 @@ class RIPACCBSScheduler(AsyncScheduler):
     high_level_order: str = "cost"
     ccbs_precision: float | None = None
     max_exact_unlabeled_atoms: int = 12
-    same_time_tol: float = 1e-10
     freeze_initial_target_atoms: bool = False
     ccbs_solution: CCBSSolution | None = field(default=None, init=False)
     _node_to_site: dict[int, Site] = field(default_factory=dict, init=False)
@@ -374,7 +330,9 @@ class RIPACCBSScheduler(AsyncScheduler):
         )
         return assignment
 
-    def _plan(self) -> None:
+    def _prepare_graph_and_agents(
+        self,
+    ) -> tuple[dict[int, Site], CCBSGraph, list[CCBSAgent]]:
         assignment = self.target_assignment()
         if self.freeze_initial_target_atoms:
             self._static_blockers = {
@@ -386,40 +344,12 @@ class RIPACCBSScheduler(AsyncScheduler):
             self._static_blockers = set()
         graph = self._build_graph()
         agents = self._ccbs_agents(assignment)
-        if not agents:
-            self.ccbs_solution = CCBSSolution(
-                found=True,
-                flowtime=0.0,
-                makespan=0.0,
-            )
-            return
-        precision = self.collision_dt if self.ccbs_precision is None else self.ccbs_precision
-
-        solver = ContinuousCBSRaw(
-            graph,
-            agents,
-            precision=precision,
-            time_limit=self.time_limit,
-            max_high_level_nodes=self.max_high_level_nodes,
-            high_level_order=self.high_level_order,
-        )
-        solution = solver.find_solution()
-        self.ccbs_solution = solution
-        if not solution.found:
-            raise RuntimeError(
-                "RIPACCBSScheduler did not find a CCBS solution "
-                f"(expanded={solution.high_level_expanded}, "
-                f"generated={solution.high_level_generated}, "
-                f"elapsed={solution.elapsed:.3f}s)"
-            )
-
-        self._emit_solution(solution)
+        return assignment, graph, agents
 
     # ---- graph / agent construction ---------------------------------------
 
     def _build_graph(self) -> CCBSGraph:
         graph = CCBSGraph()
-        graph.motion_profile = "bang_bang"
         self._node_to_site.clear()
         self._site_to_node.clear()
 
@@ -515,18 +445,18 @@ class RIPACCBSScheduler(AsyncScheduler):
 
     # ---- solution emission -------------------------------------------------
 
-    def _emit_solution(self, solution: CCBSSolution) -> None:
+    def _emit_solution(self, solution) -> None:
         segment_specs: list[_RIPACCBSSegmentSpec] = []
         for ccbs_agent_id, path in solution.paths.items():
             atom_id = self._ccbs_agent_to_atom_id[int(ccbs_agent_id)]
-            for order, move in enumerate(path.moves(include_final_hold=False)):
+            for move in path.moves(include_final_hold=False):
                 if move.u == move.v:
                     continue
                 segment_specs.append(
                     _RIPACCBSSegmentSpec(
                         atom_id=int(atom_id),
-                        start=self._node_to_site[move.u],
-                        end=self._node_to_site[move.v],
+                        start=self._node_to_site[int(move.u)],
+                        end=self._node_to_site[int(move.v)],
                         start_time=float(move.t1),
                         channel=self._channel_for_move(move),
                     )
@@ -535,28 +465,9 @@ class RIPACCBSScheduler(AsyncScheduler):
             segment_specs.sort(key=lambda spec: (spec.start_time, spec.atom_id, spec.end))
             self.append_step(_RIPACCBSPlanStep(tuple(segment_specs)))
 
-    def _same_time_groups(
-        self,
-        move_items: list[tuple[float, int, int, TimedMove]],
-    ) -> Iterable[list[tuple[float, int, int, TimedMove]]]:
-        group: list[tuple[float, int, int, TimedMove]] = []
-        group_time: float | None = None
-        for item in move_items:
-            t = item[0]
-            if group_time is None or abs(t - group_time) <= self.same_time_tol:
-                group.append(item)
-                if group_time is None:
-                    group_time = t
-                continue
-            yield group
-            group = [item]
-            group_time = t
-        if group:
-            yield group
-
-    def _channel_for_move(self, move: TimedMove) -> Channel:
-        start = self._node_to_site[move.u]
-        end = self._node_to_site[move.v]
+    def _channel_for_move(self, move) -> Channel:
+        start = self._node_to_site[int(move.u)]
+        end = self._node_to_site[int(move.v)]
         if start[1] == end[1] and start[0] != end[0]:
             return "row"
         if start[0] == end[0] and start[1] != end[1]:
@@ -644,4 +555,14 @@ class RIPACCBSScheduler(AsyncScheduler):
         }
 
 
-RIPACBSRawScheduler = RIPACCBSScheduler
+__all__ = [
+    "CCBSAgent",
+    "CCBSGraph",
+    "CCBSSolution",
+    "Channel",
+    "GraphMode",
+    "RIPACCBSBaseScheduler",
+    "TimedMove",
+    "TimedPath",
+    "TimedState",
+]

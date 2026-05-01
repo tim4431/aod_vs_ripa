@@ -1,6 +1,6 @@
 """C++-backed RIPA CCBS scheduler.
 
-This module keeps the Python-facing scheduler API from `ripa_ccbs.py`, but
+This module uses the shared RIPA CCBS adapter from `ripa_ccbs_common.py`, then
 delegates the high-level CBS and low-level SIPP search to the standalone C++
 solver in `ccbs_c/ccbs_solver.cpp`.
 """
@@ -12,17 +12,22 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ccbs_c.continuous_cbs_translated import CCBSSolution, TimedPath, TimedState
-from .ripa_ccbs import GraphMode, RIPACCBSScheduler
+from .ripa_ccbs_common import (
+    CCBSSolution,
+    GraphMode,
+    RIPACCBSBaseScheduler,
+    TimedPath,
+    TimedState,
+)
 
 
 @dataclass
-class RIPACCBSCScheduler(RIPACCBSScheduler):
+class RIPACCBSCScheduler(RIPACCBSBaseScheduler):
     """RIPA CCBS scheduler using a raw C++ search backend.
 
     The C++ backend receives a finite RIPA graph, labeled start/goal pairs, and
-    solver options through stdin. It returns timed node paths, which this class
-    emits through the same RIPA segment batch used by `RIPACCBSScheduler`.
+    solver options through stdin. It returns timed node paths, which the shared
+    adapter emits as one validated RIPA trajectory plan.
     """
 
     solver_path: str | os.PathLike[str] | None = None
@@ -31,18 +36,7 @@ class RIPACCBSCScheduler(RIPACCBSScheduler):
     solver_timeout_padding: float = 5.0
 
     def _plan(self) -> None:
-        assignment = self.target_assignment()
-        if self.freeze_initial_target_atoms:
-            self._static_blockers = {
-                tuple(self.request.src[atom_id])
-                for atom_id, target in assignment.items()
-                if tuple(self.request.src[atom_id]) == tuple(target)
-            }
-        else:
-            self._static_blockers = set()
-
-        graph = self._build_graph()
-        agents = self._ccbs_agents(assignment)
+        _assignment, graph, agents = self._prepare_graph_and_agents()
         if not agents:
             self.ccbs_solution = CCBSSolution(found=True, flowtime=0.0, makespan=0.0)
             return
