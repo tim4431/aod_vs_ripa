@@ -1,6 +1,6 @@
 """RIPA vs AOD synchronized benchmark GIF.
 
-Renders RIPA pebble-adv (left) and AOD sqrt-time (right) on one shared
+Renders RIPA pebble-adv and AOD schedulers on one shared
 physics clock. When one scheduler finishes early, its panel freezes in
 place while the other keeps moving until both are done -- AtomEnsemble's
 `position_at(t)` clamps each atom to its final site past its sequence end.
@@ -29,39 +29,46 @@ from src.routing import (
     storage_subgrid,
 )
 from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
+from src.scheduler.tetris import AODTetrisScheduler
 from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.visualization import render_animation
 
 N = 10
 TARGET_SIDE = 7
+ATOM_COUNT = TARGET_SIDE * TARGET_SIDE
 SEED = 260405317
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 4.0
 
 PREFIX = "defect_free_assembly_benchmark"
 
-# Dict order = panel order (RIPA left, AOD right). Keys also become panel labels.
+# Dict order = panel order. Keys also become panel labels.
 SCHEDULERS = {
     "RIPA pebble adv": UnlabeledRIPAPebbleAdvScheduler,
+    "AOD Tetris": AODTetrisScheduler,
     "AOD sqrt-time": SqrtTimeAODScheduler,
 }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RIPA vs AOD synchronized benchmark GIF.")
+    parser = argparse.ArgumentParser(
+        description="RIPA vs AOD synchronized benchmark GIF."
+    )
     parser.add_argument(
-        "--demo", action="store_true",
+        "--demo",
+        action="store_true",
         help="render a high-quality GIF into demo/ instead of a quick render/ check",
     )
     parser.add_argument(
-        "--no-render", action="store_true",
+        "--no-render",
+        action="store_true",
         help="print the benchmark table only and skip rendering",
     )
     args = parser.parse_args()
 
     grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
     storage = storage_subgrid(N, 1)
-    src = random_sample_sites(storage, TARGET_SIDE * TARGET_SIDE, SEED)
+    src = random_sample_sites(storage, ATOM_COUNT, SEED)
     dst = centered_storage_square(N, TARGET_SIDE, 1)
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=False)
     print(
@@ -97,9 +104,9 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=1e4,
+        time_dilation=6e3,
         hold_seconds=1.5,
-        atom_colors={idx:"gray" for idx in range(N * N)},
+        atom_colors={idx: "gray" for idx in range(N * N)},
         title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
     )
     print(f"wrote {out_path}")

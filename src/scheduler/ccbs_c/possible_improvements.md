@@ -51,3 +51,29 @@ scheduler that targets dense line inversions while falling back to the existing
 backend for unsupported requests. It now translates solved symmetric windows
 across identical rows/columns, so the 6x6 inversion needs one grouped solve plus
 one pairwise middle solve instead of six of each.
+
+## Generality Checks
+
+Run:
+
+```bash
+python example/ripa_ccbs_c_windowed_experiments.py
+```
+
+Current deterministic checks:
+
+```text
+train       C++ CCBS plain     no   -
+train       C++ CCBS windowed  yes  1619.005 us
+random      C++ CCBS plain     yes  552.523 us
+random      C++ CCBS windowed  yes  552.523 us
+```
+
+The 1D 11-atom train inversion is still a structured reciprocal line-swap
+case, so windowing is useful: the decomposed scheduler solves inside the
+3-second budget while one-shot C++ CCBS does not.
+
+The 25-atom labeled random routing case is not such a permutation. The windowed
+scheduler uses no windows and falls back to the plain backend, producing the
+same motion duration and search counts. So windowing is not currently a general
+improvement; it is a targeted decomposition for line-inversion-like structure.

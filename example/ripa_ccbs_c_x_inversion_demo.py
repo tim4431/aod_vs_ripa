@@ -129,7 +129,7 @@ def solve_swap_stage(
     scheduler = RIPACCBSCScheduler(
         request,
         collision_dt=COLLISION_DT,
-        ccbs_precision=1e-7,
+        ccbs_precision=1e-6,
         time_limit=TIME_LIMIT,
         max_high_level_nodes=MAX_HIGH_LEVEL_NODES,
         high_level_order="conflicts",
@@ -202,7 +202,7 @@ def build_windowed_x_inversion(
     scheduler = RIPACCBSWindowedScheduler(
         request,
         collision_dt=COLLISION_DT,
-        ccbs_precision=1e-7,
+        ccbs_precision=1e-6,
         time_limit=TIME_LIMIT,
         max_high_level_nodes=MAX_HIGH_LEVEL_NODES,
         high_level_order="conflicts",
@@ -218,8 +218,6 @@ def benchmark_inversion(
     grid: Grid,
     src: list[Site],
     dst: list[Site],
-    *,
-    only: str,
 ) -> list[InversionBenchmarkResult]:
     runners = {
         "pairwise": (
@@ -231,10 +229,8 @@ def benchmark_inversion(
             lambda: _benchmark_windowed(grid, src, dst),
         ),
     }
-    selected = ["pairwise", "windowed"] if only == "all" else [only]
     results: list[InversionBenchmarkResult] = []
-    for key in selected:
-        name, runner = runners[key]
+    for name, runner in runners.values():
         started = time.perf_counter()
         try:
             result = runner()
@@ -348,18 +344,14 @@ def main() -> None:
         description="Benchmark C++ CCBS variants on a 6x6 x-inversion."
     )
     parser.add_argument(
-        "--demo", action="store_true",
+        "--demo",
+        action="store_true",
         help="render a high-quality GIF into demo/ instead of a quick render/ check",
     )
     parser.add_argument(
-        "--no-render", action="store_true",
+        "--no-render",
+        action="store_true",
         help="print the summary only and skip rendering",
-    )
-    parser.add_argument(
-        "--only",
-        choices=("all", "pairwise", "windowed"),
-        default="all",
-        help="benchmark both schedulers, or only one variant",
     )
     args = parser.parse_args()
 
@@ -372,7 +364,7 @@ def main() -> None:
         "task=x-inversion"
     )
 
-    results = benchmark_inversion(grid, src, dst, only=args.only)
+    results = benchmark_inversion(grid, src, dst)
     print(format_inversion_benchmark_table(results))
 
     failures = [result for result in results if not result.ok]
@@ -402,9 +394,10 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=1e4,
+        time_dilation=5e3,
         hold_seconds=1.5,
         atom_colors=x_gradient_colors(src),
+        show_routing_on_start=False,
         title=f"C++ CCBS x-inversion benchmark ({TARGET_SIDE}x{TARGET_SIDE})",
     )
     print(f"wrote {out_path}")

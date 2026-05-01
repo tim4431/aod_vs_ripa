@@ -13,6 +13,7 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 | Scheduler | Sync/Async | Labeled/Unlabeled | Hardware |
 |---|---|---|---|
 | [`SqrtTimeAODScheduler`](aod_sqrt_time.py) | Sync | Unlabeled | AOD |
+| [`AODTetrisScheduler`](tetris/aod_tetris.py) | Sync | Unlabeled | AOD |
 | [`RIPANaiveSyncScheduler`](ripa_naive_sync.py) | Sync | Both | RIPA |
 | [`RIPAPebbleScheduler`](ripa_pebble.py) | Async | Both | RIPA |
 | [`RIPAPebbleAdvScheduler`](ripa_pebble_adv.py) | Async | Labeled | RIPA |
@@ -23,6 +24,8 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 ## Description of the schedulers
 
 `SqrtTimeAODScheduler` emits one AOD lattice shift per scheduler clock cycle, using a Python translation of the proposed sqrt-time algorithm's alignment, inverse-alignment, Gale-Ryser, and two-step/three-step arbitrary reconfiguration routines. Because an AOD cycle moves a whole lattice of atoms at once, `AtomEnsemble.append_segments_batch(...)` validates all same-cycle atom segments as one simultaneous mutation.
+
+`AODTetrisScheduler` implements the Tetris algorithm from Phys. Rev. Applied 19, 054032 (2023). It processes loaded rows in order, horizontally assigning each row's atoms to the target columns whose earliest unfilled target rows are most urgent, then compresses each target column vertically. The raw algorithm lives in [`tetris/core.py`](tetris/core.py); the scheduler only translates those row/column moves into `AODStep`s.
 
 `RIPANaiveSyncScheduler` assumes an M-period storage/highway pattern (e.g. `M=2`: even rows/columns hold atoms, odd ones are highways), and each clock cycle proposes one next RIPA leg per unfinished atom, scoring routes by path length, lane load, and occupied blockers before committing the largest greedy collision-free same-start batch. For unlabeled requests it first assigns atoms to targets by estimated highway route cost (exact DP for small atom counts, greedy fallback for larger).
 

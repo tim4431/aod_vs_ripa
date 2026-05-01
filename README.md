@@ -13,7 +13,7 @@ Routing identical atoms, for example, in the case of assembling a defect-free ar
 
 The RIPA scheduler is the heuristic scheduler [RIPAPebbleAdvScheduler](./src/scheduler/ripa_pebble_adv.py).
 
-The AOD scheduler is a [Sqrt-time scheduler](https://arxiv.org/pdf/2604.05317v1) that fully utilizes the parallelism of the AOD.
+We choose two AOD schedulers to compare with, one is the [Tetris](https://journals.aps.org/prapplied/abstract/10.1103/PhysRevApplied.19.054032) suitable for stochastic reservoir loading with postselection; and the other one is a [Sqrt-time scheduler](https://arxiv.org/pdf/2604.05317v1) that fully utilizes the parallelism of the AOD to solve a binary-grid reconfiguration problem.
 
 ![defect free assembly](demo/defect_free_assembly_benchmark.gif)
 
