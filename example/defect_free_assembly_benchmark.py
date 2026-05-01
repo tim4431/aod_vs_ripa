@@ -86,10 +86,10 @@ def main() -> None:
 
     if args.demo:
         out_path = ROOT / "demo" / f"{PREFIX}.gif"
-        quality, fps = "quality", 20
+        quality = "quality"
     else:
         out_path = ROOT / "render" / f"{PREFIX}.gif"
-        quality, fps = "speed", 6
+        quality = "speed"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     render_animation(
@@ -97,8 +97,7 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        fps=fps,
-        time_dilation=2e4,
+        time_dilation=1e4,
         hold_seconds=1.5,
         atom_colors={idx:"gray" for idx in range(N * N)},
         title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",

@@ -48,9 +48,9 @@ PREFIX = "defect_free_assembly_highway"
 # assignment from Hungarian to bottleneck so atoms already in target slots
 # also participate in routing instead of self-assigning at zero cost.
 SCHEDULERS = {
-    "ripa_ccbs_c": lambda req: RIPACCBSCScheduler(
-        req, time_limit=10.0, max_high_level_nodes=5_000,
-    ),
+    # "ripa_ccbs_c": lambda req: RIPACCBSCScheduler(
+    #     req, time_limit=10.0, max_high_level_nodes=5_000,
+    # ),
     "ripa_pebble": lambda req: RIPAPebbleScheduler(req, highway_period=STORAGE_PERIOD),
     "ripa_pebble_adv": UnlabeledRIPAPebbleAdvScheduler,
     "ripa_pebble_adv_min_max": lambda req: UnlabeledRIPAPebbleAdvScheduler(
@@ -99,10 +99,10 @@ def main() -> None:
 
     if args.demo:
         out_path = ROOT / "demo" / f"{PREFIX}.gif"
-        quality, fps = "quality", 20
+        quality = "quality"
     else:
         out_path = ROOT / "render" / f"{PREFIX}.gif"
-        quality, fps = "speed", 6
+        quality = "speed"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     render_animation(
@@ -110,8 +110,7 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        fps=fps,
-        time_dilation=2e4,
+        time_dilation=1e4,
         hold_seconds=1.5,
         title=f"RIPA defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
     )

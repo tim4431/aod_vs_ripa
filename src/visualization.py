@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
+import subprocess
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -45,6 +47,7 @@ PlannedTrajectoryMode = Literal["none", "full", "next"]
 AddressedStyle = Literal["edge", "blob", "both", "none"]
 RenderView = Literal["demo", "benchmark", "detail"]
 RenderQuality = Literal["speed", "quality"]
+RenderFormat = Literal["gif", "webp", "apng"]
 
 ATOM_SIZE = 40.0
 GRIDPOINT_SIZE = 12.0
@@ -60,6 +63,7 @@ BENCH_WIDTH_PER_PANEL = 4.0
 @dataclass(frozen=True)
 class _Style:
     dpi: int
+    fps: int
     addressed_style: AddressedStyle
     show_motion_blur: bool
     trail_samples: int
@@ -69,7 +73,8 @@ class _Style:
 
 _QUALITY: dict[RenderQuality, _Style] = {
     "speed": _Style(
-        dpi=90,
+        dpi=80,
+        fps=6,
         addressed_style="edge",
         show_motion_blur=False,
         trail_samples=0,
@@ -77,7 +82,8 @@ _QUALITY: dict[RenderQuality, _Style] = {
         planned_samples_per_segment=18,
     ),
     "quality": _Style(
-        dpi=150,
+        dpi=120,
+        fps=20,
         addressed_style="blob",
         show_motion_blur=True,
         trail_samples=12,
@@ -554,7 +560,7 @@ def render_animation(
     view: RenderView = "demo",
     quality: RenderQuality = "speed",
     labels: Iterable[str] | None = None,
-    fps: int = 20,
+    fps: int | None = None,
     time_dilation: float = 1e4,
     hold_seconds: float = 1.0,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
@@ -563,18 +569,30 @@ def render_animation(
     show_routing_on_start: bool = True,
     title: str | None = None,
     show_progress: bool = True,
+    fmt: RenderFormat | None = None,
 ) -> Path:
-    """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into a GIF.
+    """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into an animation.
 
-    GIF speed is controlled by exactly two parameters:
+    Playback speed is controlled by exactly two parameters:
       - `time_dilation`: animation seconds per 1 second of execution time.
         e.g. `time_dilation=1e4` plays a 100 us run as a 1 s GIF.
-      - `fps`: GIF playback frame rate.
+      - `fps`: playback frame rate. Defaults to the quality preset
+        (6 for "speed", 20 for "quality") when None.
     The physics-time step per frame is `1 / (time_dilation * fps)`.
 
+    Output format is `fmt` if given, otherwise inferred from
+    `output_path`'s extension (.gif, .webp, .apng/.png). WebP is lossless
+    and typically the smallest; GIF output is post-processed with
+    `gifsicle -O3` when that binary is on PATH. Start/end hold frames are
+    encoded as a single frame with an extended per-frame duration instead
+    of repeating identical frames.
+
     Frame rendering is parallelized across `os.cpu_count()` worker
-    processes; GIF stitching itself remains serial.
+    processes; stitching itself remains serial.
     """
+    style = _QUALITY[quality]
+    if fps is None:
+        fps = style.fps
     if fps <= 0:
         raise ValueError("fps must be positive")
     if time_dilation <= 0:
@@ -584,16 +602,17 @@ def render_animation(
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    dpi = _QUALITY[quality].dpi
+    fmt = fmt or _infer_render_format(out)
+    dpi = style.dpi
 
     if view == "benchmark":
-        items = _normalize_motion_items(motion, labels)
-        if not items:
+        items_norm = _normalize_motion_items(motion, labels)
+        if not items_norm:
             raise ValueError("benchmark view needs at least one motion object")
         total = max(
             (
                 (m if isinstance(m, AtomEnsemble) else m.ensemble).total_duration()
-                for _, m in items
+                for _, m in items_norm
             ),
             default=0.0,
         )
@@ -609,14 +628,23 @@ def render_animation(
             0.0, total, max(2, int(math.ceil(total / frame_dt)) + 1), dtype=float
         )
     )
-    hold_count = max(0, int(round(hold_seconds * fps)))
-    schedule = np.concatenate(
-        [
-            np.full(hold_count, moving_times[0], dtype=float),
-            moving_times,
-            np.full(hold_count, moving_times[-1], dtype=float),
-        ]
-    )
+
+    frame_dur_ms = max(1, int(round(1000.0 / fps)))
+    hold_ms = max(0, int(round(hold_seconds * 1000.0)))
+    has_routing_frame = bool(show_routing_on_start and hold_ms > 0)
+
+    plan: list[tuple[float, bool]] = []
+    durations: list[int] = []
+    if has_routing_frame:
+        plan.append((float(moving_times[0]), True))
+        durations.append(hold_ms)
+    for t in moving_times:
+        plan.append((float(t), False))
+        durations.append(frame_dur_ms)
+    if hold_ms > 0:
+        if not has_routing_frame:
+            durations[0] += hold_ms
+        durations[-1] += hold_ms
 
     draw_kwargs = dict(
         view=view, quality=quality,
@@ -626,7 +654,9 @@ def render_animation(
         show_atom_ids=show_atom_ids, title=title,
     )
 
-    items: list[tuple[int, float]] = [(k, float(t)) for k, t in enumerate(schedule)]
+    items: list[tuple[int, float, bool]] = [
+        (k, t, sr) for k, (t, sr) in enumerate(plan)
+    ]
     n_workers = min(os.cpu_count() or 1, len(items))
 
     with tempfile.TemporaryDirectory(prefix="aod_vs_ripa_frames_") as tmp:
@@ -635,10 +665,7 @@ def render_animation(
         with ProcessPoolExecutor(
             max_workers=n_workers,
             initializer=_frame_worker_init,
-            initargs=(
-                motion, draw_kwargs, dpi, hold_count,
-                show_routing_on_start, str(tmp_path),
-            ),
+            initargs=(motion, draw_kwargs, dpi, str(tmp_path)),
         ) as ex:
             results = ex.map(_frame_worker_render, items, chunksize=chunksize)
             frame_paths = [
@@ -647,7 +674,10 @@ def render_animation(
                     enabled=show_progress,
                 )
             ]
-        _save_gif_from_pngs(frame_paths, out, fps=fps, show_progress=show_progress)
+        _save_animation(
+            frame_paths, out, fmt=fmt,
+            durations=durations, show_progress=show_progress,
+        )
     return out
 
 
@@ -1042,23 +1072,16 @@ def _frame_worker_init(
     motion: Any,
     draw_kwargs: dict[str, Any],
     dpi: int,
-    hold_count: int,
-    show_routing_on_start: bool,
     tmp_path_str: str,
 ) -> None:
     _FRAME_WORKER["motion"] = motion
     _FRAME_WORKER["draw_kwargs"] = draw_kwargs
     _FRAME_WORKER["dpi"] = dpi
-    _FRAME_WORKER["hold_count"] = hold_count
-    _FRAME_WORKER["show_routing_on_start"] = show_routing_on_start
     _FRAME_WORKER["tmp_path"] = Path(tmp_path_str)
 
 
-def _frame_worker_render(item: tuple[int, float]) -> str:
-    k, t = item
-    show_routing = (
-        _FRAME_WORKER["show_routing_on_start"] and k < _FRAME_WORKER["hold_count"]
-    )
+def _frame_worker_render(item: tuple[int, float, bool]) -> str:
+    k, t, show_routing = item
     fig, _ = draw_frame(
         _FRAME_WORKER["motion"], float(t),
         show_routing=show_routing, **_FRAME_WORKER["draw_kwargs"],
@@ -1079,53 +1102,104 @@ def _progress_iter(
     yield from tqdm(items, total=total, desc=desc, unit="frame")
 
 
-def _save_gif_from_pngs(
+def _infer_render_format(path: Path) -> RenderFormat:
+    """Map a file extension to a `RenderFormat`."""
+    ext = path.suffix.lower()
+    if ext == ".gif":
+        return "gif"
+    if ext == ".webp":
+        return "webp"
+    if ext in (".apng", ".png"):
+        return "apng"
+    raise ValueError(
+        f"cannot infer animation format from extension {ext!r}; "
+        "pass fmt='gif' | 'webp' | 'apng'"
+    )
+
+
+def _save_animation(
     frame_paths: list[Path],
     output_path: Path,
     *,
-    fps: int,
+    fmt: RenderFormat,
+    durations: list[int],
     show_progress: bool,
 ) -> None:
-    """Stitch PNG frames into an animated GIF.
+    """Stitch PNG frames into an animation in `fmt`.
 
-    All frames are quantized to a single shared 128-color palette derived
-    from the middle frame (so it captures both the static layout and a
-    representative moving state). A shared palette plus `optimize=True`
-    lets Pillow store inter-frame diffs, which on mostly-static matplotlib
-    figures shrinks the GIF substantially without changing pixel resolution.
+    GIF goes through a shared 128-color palette (from the middle frame) so
+    `optimize=True` can encode inter-frame diffs, then `gifsicle -O3` if
+    available. WebP/APNG keep RGBA and rely on the codec.
     """
     if not frame_paths:
         raise ValueError("no frames to save")
-    duration_ms = int(round(1000 / fps))
+    if len(durations) != len(frame_paths):
+        raise ValueError("durations length must match frame_paths length")
 
-    with Image.open(frame_paths[len(frame_paths) // 2]) as ref:
-        palette_master = ref.convert("RGB").quantize(
-            colors=128,
-            method=Image.Quantize.MEDIANCUT,
-            dither=Image.Dither.NONE,
+    palette: Image.Image | None = None
+    if fmt == "gif":
+        with Image.open(frame_paths[len(frame_paths) // 2]) as ref:
+            palette = ref.convert("RGB").quantize(
+                colors=128,
+                method=Image.Quantize.MEDIANCUT,
+                dither=Image.Dither.NONE,
+            )
+        convert = lambda raw: raw.convert("RGB").quantize(
+            palette=palette, dither=Image.Dither.NONE,
         )
+        save_kwargs: dict[str, Any] = dict(loop=0, optimize=True)
+    elif fmt == "webp":
+        convert = lambda raw: raw.convert("RGBA")
+        save_kwargs = dict(
+            format="WebP", loop=0, lossless=True, method=6, minimize_size=True,
+        )
+    elif fmt == "apng":
+        convert = lambda raw: raw.convert("RGBA")
+        save_kwargs = dict(format="PNG", loop=0)
+    else:
+        raise ValueError(f"unsupported fmt {fmt!r}")
 
     images: list[Image.Image] = []
     for path in _progress_iter(
         frame_paths, total=len(frame_paths),
-        desc="load gif frames", enabled=show_progress,
+        desc=f"load {fmt} frames", enabled=show_progress,
     ):
         with Image.open(path) as raw:
-            images.append(
-                raw.convert("RGB").quantize(
-                    palette=palette_master, dither=Image.Dither.NONE,
-                )
-            )
+            images.append(convert(raw))
     try:
         images[0].save(
             output_path,
             save_all=True,
             append_images=images[1:],
-            duration=duration_ms,
-            loop=0,
-            optimize=True,
+            duration=durations,
+            **save_kwargs,
         )
     finally:
         for image in images:
             image.close()
-        palette_master.close()
+        if palette is not None:
+            palette.close()
+
+    if fmt == "gif":
+        _try_gifsicle_optimize(output_path)
+
+
+def _try_gifsicle_optimize(path: Path) -> None:
+    """Run `gifsicle -O3` on `path` to shrink it in place when available.
+
+    Silently skipped if gifsicle is not on PATH; subprocess failure leaves
+    the original file untouched.
+    """
+    if shutil.which("gifsicle") is None:
+        return
+    tmp = path.with_suffix(path.suffix + ".opt.tmp")
+    try:
+        subprocess.run(
+            ["gifsicle", "-O3", str(path), "-o", str(tmp)],
+            check=True,
+            capture_output=True,
+        )
+        tmp.replace(path)
+    except subprocess.CalledProcessError:
+        if tmp.exists():
+            tmp.unlink()

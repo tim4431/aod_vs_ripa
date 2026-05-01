@@ -31,6 +31,8 @@ from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
 from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
+from src.scheduler.ripa_pebble_b import RIPAPebbleBScheduler
+from src.scheduler.ripa_pebble_search import RIPAPebbleSearchScheduler
 from src.visualization import render_animation
 
 N = 24
@@ -45,6 +47,8 @@ PREFIX = "inversion_6x6_benchmark"
 SCHEDULERS = {
     "ripa_pebble": lambda req: RIPAPebbleScheduler(req, highway_period=STORAGE_PERIOD),
     "ripa_pebble_adv": RIPAPebbleAdvScheduler,
+    # "ripa_pebble_b": RIPAPebbleBScheduler,
+    # "ripa_pebble_search": lambda req: RIPAPebbleSearchScheduler(req, n_iter=200, seed=0),
     "ripa_naive_sync": lambda req: RIPANaiveSyncScheduler(req, highway_period=STORAGE_PERIOD),
 }
 
@@ -104,10 +108,10 @@ def main() -> None:
 
     if args.demo:
         out_path = ROOT / "demo" / f"{PREFIX}.gif"
-        quality, fps = "quality", 20
+        quality = "quality"
     else:
         out_path = ROOT / "render" / f"{PREFIX}.gif"
-        quality, fps = "speed", 6
+        quality = "speed"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     render_animation(
@@ -115,8 +119,7 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        fps=fps,
-        time_dilation=2e4,
+        time_dilation=1e4,
         hold_seconds=1.5,
         atom_colors=x_gradient_colors(src),
         title=f"RIPA inversion - {TARGET_SIDE}x{TARGET_SIDE} array on {N}x{N} grid",
