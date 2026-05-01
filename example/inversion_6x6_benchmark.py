@@ -31,8 +31,6 @@ from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
 from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
-from src.scheduler.ripa_pebble_b import RIPAPebbleBScheduler
-from src.scheduler.ripa_pebble_search import RIPAPebbleSearchScheduler
 from src.visualization import render_animation
 
 N = 24
