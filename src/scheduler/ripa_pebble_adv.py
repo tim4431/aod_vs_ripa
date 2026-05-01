@@ -18,14 +18,13 @@ from __future__ import annotations
 import heapq
 import math
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Callable, Iterable, Literal
 
 from ..atom_trajectory import CollisionError
 from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
 from ..routing import Site
 from ..segments import bang_bang_duration
-from .base import AsyncScheduler
+from .base import AsyncScheduler, UNFromLabeledScheduler
 
 Channel = Literal["row", "col"]
 
@@ -39,15 +38,18 @@ class RIPAPebbleAdvLeg:
 
 
 @dataclass
-class RIPAPebbleAdvScheduler(AsyncScheduler):
+class RIPAPebbleAdvScheduler(UNFromLabeledScheduler, AsyncScheduler):
     """Asynchronous RIPA scheduler with no assumed highway lattice.
 
     The planner uses current occupancy as a dynamic obstacle map. Long clear
     row/column moves are preferred because each candidate edge is costed by the
     physical bang-bang duration rather than by unit grid hops.
+
+    Unlabeled requests are converted to labeled by `UNFromLabeledScheduler`'s
+    cost-matrix assignment; `_estimated_pair_cost` below feeds it the routed
+    bang-bang cost rather than Manhattan distance.
     """
 
-    max_exact_unlabeled_atoms: int = 12
     max_start_attempts: int = 32
     wait_increment: float | None = None
     wait_padding: float | None = None
@@ -55,10 +57,6 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     staged_target_fill: bool = True
     async_staging: bool = True
     """Use per-atom async starts for staged moves; false serializes each staged leg."""
-    unlabeled_assignment: Literal["min_sum", "min_max"] = "min_sum"
-    """Unlabeled cost-matrix objective. `min_max` (bottleneck) bounds the
-    longest single-atom path so atoms already in target slots also get moved
-    when that helps the makespan; ties are broken by min total cost."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -66,34 +64,6 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             raise ValueError("max_start_attempts must be >= 1")
         if self.handoff_weight < 0:
             raise ValueError("handoff_weight must be non-negative")
-        if self.unlabeled_assignment not in ("min_sum", "min_max"):
-            raise ValueError("unlabeled_assignment must be 'min_sum' or 'min_max'")
-
-    def target_assignment(self) -> dict[int, Site]:
-        """Assign unlabeled atoms by geometry-route cost."""
-        if self.request.labeled:
-            return super().target_assignment()
-
-        sources = [tuple(site) for site in self.request.src]
-        targets = [tuple(site) for site in self.request.dst]
-        n = len(sources)
-        if n == 0:
-            return {}
-
-        costs = [
-            [self._estimated_pair_cost(atom_id, src, dst) for dst in targets]
-            for atom_id, src in enumerate(sources)
-        ]
-        if self.unlabeled_assignment == "min_max":
-            bottleneck = self._bottleneck_assignment(costs, targets)
-            if bottleneck is not None:
-                return bottleneck
-        if n <= self.max_exact_unlabeled_atoms:
-            return self._exact_min_cost_assignment(costs, targets)
-        linear_assignment = self._linear_sum_assignment(costs, targets)
-        if linear_assignment is not None:
-            return linear_assignment
-        return self._greedy_min_cost_assignment(costs, targets)
 
     def _plan(self) -> None:
         # Staged compaction does its own greedy moves and bypasses
@@ -735,6 +705,11 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     # ---- assignment helpers ------------------------------------------------
 
     def _estimated_pair_cost(self, atom_id: int, src: Site, dst: Site) -> float:
+        """Bang-bang routed cost on the current occupancy map.
+
+        Overrides the parent's Manhattan default: the assignment objective sees
+        the actual physical leg duration, including blocked-corridor penalties.
+        """
         if src == dst:
             return 0.0
         occ = self._final_occupancy()
@@ -745,104 +720,6 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
                 + self._manhattan(tuple(src), tuple(dst)) * self._unit_leg_duration()
             )
         return self._path_cost(path)
-
-    @staticmethod
-    def _exact_min_cost_assignment(
-        costs: list[list[float]],
-        targets: list[Site],
-    ) -> dict[int, Site]:
-        n = len(costs)
-
-        @lru_cache(maxsize=None)
-        def solve(atom_idx: int, mask: int) -> tuple[float, tuple[int, ...]]:
-            if atom_idx == n:
-                return 0.0, ()
-
-            best_cost = float("inf")
-            best_order: tuple[int, ...] = ()
-            for target_idx in range(n):
-                bit = 1 << target_idx
-                if mask & bit:
-                    continue
-                rest_cost, rest_order = solve(atom_idx + 1, mask | bit)
-                total = costs[atom_idx][target_idx] + rest_cost
-                if total < best_cost:
-                    best_cost = total
-                    best_order = (target_idx,) + rest_order
-            return best_cost, best_order
-
-        _, order = solve(0, 0)
-        return {
-            atom_id: targets[target_idx] for atom_id, target_idx in enumerate(order)
-        }
-
-    @staticmethod
-    def _greedy_min_cost_assignment(
-        costs: list[list[float]],
-        targets: list[Site],
-    ) -> dict[int, Site]:
-        remaining = set(range(len(targets)))
-        assignment: dict[int, Site] = {}
-        for atom_id, row in enumerate(costs):
-            target_idx = min(remaining, key=lambda idx: (row[idx], targets[idx]))
-            remaining.remove(target_idx)
-            assignment[atom_id] = targets[target_idx]
-        return assignment
-
-    @staticmethod
-    def _linear_sum_assignment(
-        costs: list[list[float]],
-        targets: list[Site],
-    ) -> dict[int, Site] | None:
-        try:
-            from scipy.optimize import linear_sum_assignment
-        except Exception:
-            return None
-
-        row_ind, col_ind = linear_sum_assignment(costs)
-        return {
-            int(atom_id): targets[int(target_idx)]
-            for atom_id, target_idx in zip(row_ind, col_ind)
-        }
-
-    @staticmethod
-    def _bottleneck_assignment(
-        costs: list[list[float]],
-        targets: list[Site],
-    ) -> dict[int, Site] | None:
-        """Min-max bipartite assignment: minimize the worst single-atom cost,
-        breaking ties by min total cost. Returns None if scipy is unavailable.
-        """
-        try:
-            import numpy as np
-            from scipy.optimize import linear_sum_assignment
-        except Exception:
-            return None
-
-        C = np.asarray(costs, dtype=float)
-        if C.size == 0:
-            return {}
-        thresholds = np.unique(C)
-        BIG = float(C.max() + 1.0) * (C.shape[0] + 1) + 1.0
-
-        # Binary search for the smallest threshold admitting a perfect matching.
-        lo, hi = 0, len(thresholds) - 1
-        while lo < hi:
-            mid = (lo + hi) // 2
-            masked = np.where(C <= thresholds[mid] + 1e-15, C, BIG)
-            row_ind, col_ind = linear_sum_assignment(masked)
-            if masked[row_ind, col_ind].max() < BIG:
-                hi = mid
-            else:
-                lo = mid + 1
-
-        # Final assignment: min-sum within the threshold-feasible subgraph.
-        masked = np.where(C <= thresholds[lo] + 1e-15, C, BIG)
-        row_ind, col_ind = linear_sum_assignment(masked)
-        return {
-            int(atom_id): targets[int(target_idx)]
-            for atom_id, target_idx in zip(row_ind, col_ind)
-        }
 
 
 RIPAPebbleGeometryScheduler = RIPAPebbleAdvScheduler
