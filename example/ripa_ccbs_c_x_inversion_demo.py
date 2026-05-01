@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 from src.atom_config import Grid
 from src.routing import RoutingRequest, Site
 from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
-from src.sequence import Sequence
+from src.moving_sequence import MovingSequence
 from src.visualization import render_animation
 
 GRID_SPACING_UM = 5.0
@@ -79,7 +79,7 @@ def x_inverted_targets(src: list[Site], *, side: int, period: int, margin: int) 
     return [(hi - (i - lo), j) for i, j in src]
 
 
-def assert_x_inversion(sequence: Sequence, targets: list[Site]) -> None:
+def assert_x_inversion(sequence: MovingSequence, targets: list[Site]) -> None:
     report = sequence.validate(dt=COLLISION_DT)
     if not report.ok:
         raise RuntimeError(f"collision validation failed: {report}")
@@ -116,7 +116,7 @@ def solve_swap_stage(
     atom_b: int,
     time_limit: float,
     max_high_level_nodes: int,
-) -> tuple[Sequence, RIPACCBSCScheduler]:
+) -> tuple[MovingSequence, RIPACCBSCScheduler]:
     dst = list(current)
     dst[atom_a], dst[atom_b] = dst[atom_b], dst[atom_a]
     request = RoutingRequest(grid=grid, src=current, dst=dst, labeled=True)
@@ -140,7 +140,7 @@ def build_staged_x_inversion(
     time_limit: float,
     max_high_level_nodes: int,
     async_layers: bool,
-) -> tuple[Sequence, list[StageStats], list[Site]]:
+) -> tuple[MovingSequence, list[StageStats], list[Site]]:
     grid = Grid(
         N=grid_size(side, period, margin),
         d=GRID_SPACING_UM,
@@ -148,7 +148,7 @@ def build_staged_x_inversion(
     )
     src = storage_sites(side, period, margin)
     targets = x_inverted_targets(src, side=side, period=period, margin=margin)
-    master = Sequence(
+    master = MovingSequence(
         grid=grid,
         initial=RoutingRequest(grid, src, targets, True).initial,
         collision_dt=COLLISION_DT,
@@ -167,7 +167,7 @@ def build_staged_x_inversion(
         for columns in column_groups:
             current_by_atom = master.final_config().site_of_atom()
             current = [current_by_atom[atom_id] for atom_id in range(side * side)]
-            planned: list[tuple[int, int, int, Sequence, RIPACCBSCScheduler]] = []
+            planned: list[tuple[int, int, int, MovingSequence, RIPACCBSCScheduler]] = []
             for j in columns:
                 atom_a = atom_id_for_storage_site(side, low, j)
                 atom_b = atom_id_for_storage_site(side, high, j)

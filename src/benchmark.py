@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping
 
 from .routing import RoutingRequest
-from .sequence import Sequence
+from .moving_sequence import MovingSequence
 
 SchedulerFactory = Callable[[RoutingRequest], object]
 
@@ -21,7 +21,7 @@ class BenchmarkResult:
     steps: int = 0
     segments: int = 0
     clock_cycles: int | None = None
-    sequence: Sequence | None = None
+    sequence: MovingSequence | None = None
     error: Exception | None = None
 
     @property

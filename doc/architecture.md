@@ -1,9 +1,5 @@
 # Architecture
 
-## Timing
-
-All segment times are absolute. `Sequence.next_start_time()` returns the current total duration plus `inter_step_gap`, or `0` before any motion.
-
 
 ## Validation
 

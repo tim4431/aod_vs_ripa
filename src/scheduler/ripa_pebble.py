@@ -497,7 +497,7 @@ class RIPAPebbleScheduler(AsyncScheduler):
         final_time = self.ensemble.atomtraj_by_id(atom_id).final_time
         if final_time <= 0:
             return 0.0
-        return final_time + self.inter_step_gap
+        return final_time
 
     def _wait_increment(self) -> float:
         if self.wait_increment is not None:

@@ -4,7 +4,6 @@ A Sequence owns:
 - the initial AtomConfig (resting state at t=0),
 - the Grid (lives at the request/sequence level, not on AtomConfig),
 - an AtomEnsemble that the steps mutate as they're appended,
-- an `inter_step_gap` (e.g. trap settle time) inserted between steps.
 
 Validation is automatic: every segment goes through
 `AtomEnsemble.append_segment`, which checks continuity AND cross-atom
@@ -31,10 +30,9 @@ from .segments import Segment
 
 
 @dataclass
-class Sequence:
+class MovingSequence:
     grid: Grid
     initial: AtomConfig
-    inter_step_gap: float = 0.0
     # Forwarded to the underlying AtomEnsemble's collision validator.
     collision_dt: float = 1e-6
     steps: list[Step] = field(default_factory=list)
@@ -56,9 +54,9 @@ class Sequence:
 
     def next_start_time(self) -> float:
         """Earliest valid start_time for a *new* step appended after the
-        current ensemble state, accounting for `inter_step_gap`."""
+        current ensemble state."""
         T = self.total_duration()
-        return T + self.inter_step_gap if T > 0 else 0.0
+        return T if T > 0 else 0.0
 
     def final_config(self) -> AtomConfig:
         return self.ensemble.final_config()

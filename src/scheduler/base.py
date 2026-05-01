@@ -16,10 +16,10 @@ from typing import Callable, Iterable
 from ..atom_trajectory import AtomEnsemble
 from ..movement import Step
 from ..routing import RoutingRequest, Site
-from ..sequence import Sequence
+from ..moving_sequence import MovingSequence
 
-CostFunction = Callable[[Sequence], float]
-CandidateBuilder = Callable[[Sequence], None]
+CostFunction = Callable[[MovingSequence], float]
+CandidateBuilder = Callable[[MovingSequence], None]
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ class ScheduleTrial:
 
     ok: bool
     cost: float = math.inf
-    sequence: Sequence | None = None
+    sequence: MovingSequence | None = None
     error: Exception | None = None
     clock_cycles: int = 0
 
@@ -38,19 +38,17 @@ class Scheduler(ABC):
     """Abstract base class for RoutingRequest schedulers."""
 
     request: RoutingRequest
-    inter_step_gap: float = 0.0
     collision_dt: float = 1e-6
     validate_final: bool = True
     cost_function: CostFunction | None = None
-    sequence: Sequence = field(init=False)
+    sequence: MovingSequence = field(init=False)
     last_error: Exception | None = field(default=None, init=False)
     _planned: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.sequence = Sequence(
+        self.sequence = MovingSequence(
             grid=self.request.grid,
             initial=self.request.initial,
-            inter_step_gap=self.inter_step_gap,
             collision_dt=self.collision_dt,
         )
 
@@ -58,7 +56,7 @@ class Scheduler(ABC):
     def ensemble(self) -> AtomEnsemble:
         return self.sequence.ensemble
 
-    def plan(self) -> Sequence:
+    def plan(self) -> MovingSequence:
         """Build and return the movement sequence."""
         if self._planned:
             return self.sequence
@@ -91,7 +89,7 @@ class Scheduler(ABC):
 
     # ---- trial/evaluation helpers -----------------------------------------
 
-    def cost(self, sequence: Sequence | None = None) -> float:
+    def cost(self, sequence: MovingSequence | None = None) -> float:
         """Objective value for a candidate sequence.
 
         The default objective is the physical arrangement duration, matching
@@ -104,13 +102,12 @@ class Scheduler(ABC):
             return float(self.cost_function(seq))
         return float(seq.total_duration())
 
-    def clone_sequence(self, sequence: Sequence | None = None) -> Sequence:
+    def clone_sequence(self, sequence: MovingSequence | None = None) -> MovingSequence:
         """Replay a sequence into a fresh `Sequence` for speculative edits."""
         source = self.sequence if sequence is None else sequence
-        clone = Sequence(
+        clone = MovingSequence(
             grid=source.grid,
             initial=source.initial.copy(),
-            inter_step_gap=source.inter_step_gap,
             collision_dt=source.collision_dt,
         )
         for step in source.steps:
@@ -121,7 +118,7 @@ class Scheduler(ABC):
         self,
         build: CandidateBuilder,
         *,
-        base: Sequence | None = None,
+        base: MovingSequence | None = None,
         clock_cycles: int = 1,
     ) -> ScheduleTrial:
         """Run `build(cloned_sequence)` and score it without live mutation."""
@@ -145,13 +142,13 @@ class Scheduler(ABC):
         self,
         steps: Iterable[Step],
         *,
-        base: Sequence | None = None,
+        base: MovingSequence | None = None,
         clock_cycles: int | None = None,
     ) -> ScheduleTrial:
         """Evaluate appending `steps` one after another on cloned state."""
         batch = tuple(steps)
 
-        def build(seq: Sequence) -> None:
+        def build(seq: MovingSequence) -> None:
             for step in batch:
                 seq.append(step)
 
@@ -162,7 +159,7 @@ class Scheduler(ABC):
             clock_cycles=cycles,
         )
 
-    def commit_trial(self, trial: ScheduleTrial) -> Sequence:
+    def commit_trial(self, trial: ScheduleTrial) -> MovingSequence:
         """Promote a successful trial sequence to live scheduler state."""
         if not trial.ok or trial.sequence is None:
             if trial.error is not None:
@@ -242,17 +239,17 @@ class SyncScheduler(Scheduler):
         self,
         steps: Iterable[Step],
         *,
-        base: Sequence | None = None,
+        base: MovingSequence | None = None,
     ) -> ScheduleTrial:
         """Evaluate a same-start batch as one scheduler clock cycle."""
         batch = list(steps)
 
-        def build(seq: Sequence) -> None:
+        def build(seq: MovingSequence) -> None:
             seq.append_sync_batch(batch)
 
         return self.evaluate_candidate(build, base=base, clock_cycles=1)
 
-    def commit_trial(self, trial: ScheduleTrial) -> Sequence:
+    def commit_trial(self, trial: ScheduleTrial) -> MovingSequence:
         try:
             sequence = super().commit_trial(trial)
         except Exception as exc:
