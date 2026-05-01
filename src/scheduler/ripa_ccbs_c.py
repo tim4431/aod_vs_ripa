@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .continuous_cbs_raw import CCBSSolution, TimedPath, TimedState
+from .ccbs_c.continuous_cbs_translated import CCBSSolution, TimedPath, TimedState
 from .ripa_ccbs import GraphMode, RIPACCBSScheduler
 
 

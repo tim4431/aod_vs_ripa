@@ -24,8 +24,9 @@ from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
 from src.routing import (
     RoutingRequest,
-    centered_square_targets,
-    stochastically_loaded_sites,
+    centered_storage_square,
+    random_sample_sites,
+    storage_subgrid,
 )
 from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
 from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
@@ -59,8 +60,9 @@ def main() -> None:
     args = parser.parse_args()
 
     grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
-    src = stochastically_loaded_sites(N, TARGET_SIDE * TARGET_SIDE, SEED)
-    dst = centered_square_targets(N, TARGET_SIDE)
+    storage = storage_subgrid(N, 1)
+    src = random_sample_sites(storage, TARGET_SIDE * TARGET_SIDE, SEED)
+    dst = centered_storage_square(N, TARGET_SIDE, 1)
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=False)
     print(
         f"seed={SEED}, N={N}, loaded={len(src)} atoms "
@@ -98,6 +100,7 @@ def main() -> None:
         fps=fps,
         time_dilation=2e4,
         hold_seconds=1.5,
+        atom_colors={idx:"gray" for idx in range(N * N)},
         title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
     )
     print(f"wrote {out_path}")

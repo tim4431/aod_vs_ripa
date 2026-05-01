@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 from pathlib import Path
 
@@ -22,7 +21,12 @@ if str(ROOT) not in sys.path:
 
 from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
-from src.routing import RoutingRequest
+from src.routing import (
+    RoutingRequest,
+    centered_storage_square,
+    random_sample_sites,
+    storage_subgrid,
+)
 from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
@@ -54,29 +58,6 @@ SCHEDULERS = {
     ),
     "ripa_naive_sync": lambda req: RIPANaiveSyncScheduler(req, highway_period=STORAGE_PERIOD),
 }
-
-
-def storage_subgrid(N: int, period: int) -> list[tuple[int, int]]:
-    """Sites on the even-storage subgrid (odd rows/cols are highways)."""
-    return [(i, j) for i in range(0, N, period) for j in range(0, N, period)]
-
-
-def random_sample_sites(sites, count, seed):
-    rng = random.Random(seed)
-    chosen = list(sites)
-    rng.shuffle(chosen)
-    return sorted(chosen[:count])
-
-
-def centered_storage_square(N: int, side: int, period: int) -> list[tuple[int, int]]:
-    """Centered side x side target square on the storage subgrid."""
-    storage = list(range(0, N, period))
-    center = (N - 1) / 2
-    s = min(
-        range(len(storage) - side + 1),
-        key=lambda i: abs((storage[i] + storage[i + side - 1]) / 2 - center),
-    )
-    return [(storage[i], storage[j]) for i in range(s, s + side) for j in range(s, s + side)]
 
 
 def main() -> None:

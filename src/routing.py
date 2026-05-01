@@ -55,6 +55,30 @@ def centered_square_targets(N: int, side: int) -> list[Site]:
     ]
 
 
+def storage_subgrid(N: int, period: int) -> list[Site]:
+    """Sites on the even-storage subgrid (odd rows/cols are highways)."""
+    return [(i, j) for i in range(0, N, period) for j in range(0, N, period)]
+
+
+def random_sample_sites(sites: Sequence[Site], count: int, seed: int) -> list[Site]:
+    """Sample `count` sites uniformly at random from `sites`."""
+    rng = random.Random(seed)
+    chosen = list(sites)
+    rng.shuffle(chosen)
+    return sorted(chosen[:count])
+
+
+def centered_storage_square(N: int, side: int, period: int) -> list[Site]:
+    """Centered side x side target square on the storage subgrid."""
+    storage = list(range(0, N, period))
+    center = (N - 1) / 2
+    s = min(
+        range(len(storage) - side + 1),
+        key=lambda i: abs((storage[i] + storage[i + side - 1]) / 2 - center),
+    )
+    return [(storage[i], storage[j]) for i in range(s, s + side) for j in range(s, s + side)]
+
+
 @dataclass
 class RoutingRequest:
     grid: Grid

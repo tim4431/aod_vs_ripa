@@ -46,8 +46,8 @@ AddressedStyle = Literal["edge", "blob", "both", "none"]
 RenderView = Literal["demo", "benchmark", "detail"]
 RenderQuality = Literal["speed", "quality"]
 
-ATOM_SIZE = 70.0
-TRAP_SIZE = 12.0
+ATOM_SIZE = 40.0
+GRIDPOINT_SIZE = 12.0
 TIME_FACTOR_US = 1e6
 FREQ_LABEL = "nu / FSR1 (mod 1)"
 
@@ -78,7 +78,7 @@ _QUALITY: dict[RenderQuality, _Style] = {
     ),
     "quality": _Style(
         dpi=150,
-        addressed_style="both",
+        addressed_style="blob",
         show_motion_blur=True,
         trail_samples=12,
         tone_samples_per_segment=96,
@@ -95,7 +95,7 @@ def draw_grid_dots(ax: Any, grid: Grid) -> None:
     ii, jj = np.meshgrid(np.arange(grid.N), np.arange(grid.N), indexing="ij")
     xy = grid.ij_to_xy(np.column_stack([ii.ravel(), jj.ravel()]).astype(float))
     ax.scatter(
-        xy[:, 0], xy[:, 1], s=TRAP_SIZE * 0.7, c="#9a9a9a",
+        xy[:, 0], xy[:, 1], s=GRIDPOINT_SIZE * 0.7, c="#9a9a9a",
         alpha=0.22, linewidths=0, zorder=1,
     )
 
@@ -120,8 +120,21 @@ def draw_grid_frame(ax: Any, grid: Grid) -> None:
     ax.set_ylabel("y (um)")
 
 
-def draw_aod_traps(ax: Any, sequence: Any, t: float) -> None:
-    """Draw red square markers at every active AOD trap *not* currently holding an atom."""
+def draw_aod_traps(
+    ax: Any,
+    sequence: Any,
+    t: float,
+    *,
+    addressed_style: AddressedStyle = "edge",
+) -> None:
+    """Mark every active AOD trap *not* currently holding an atom.
+
+    `addressed_style` matches the atom-rendering convention: "edge" draws a
+    red square outline, "blob" draws a soft red Gaussian halo, "both" draws
+    each, "none" suppresses the markers.
+    """
+    if addressed_style == "none":
+        return
     ensemble = getattr(sequence, "ensemble", None)
     steps = getattr(sequence, "steps", None)
     if ensemble is None or not steps:
@@ -136,11 +149,16 @@ def draw_aod_traps(ax: Any, sequence: Any, t: float) -> None:
         xy = xy[~(dists < tol).any(axis=1)]
         if not len(xy):
             return
-    ax.scatter(
-        xy[:, 0], xy[:, 1], s=TRAP_SIZE * 5.0, marker="s",
-        facecolors="none", edgecolors="#d62728",
-        linewidths=1.1, alpha=0.70, zorder=3.6,
-    )
+    if addressed_style in ("blob", "both"):
+        sigma = max(ensemble.grid.d * 0.22, 1e-9)
+        for x, y in xy:
+            _draw_gaussian_blob(ax, float(x), float(y), sigma)
+    if addressed_style in ("edge", "both"):
+        ax.scatter(
+            xy[:, 0], xy[:, 1], s=GRIDPOINT_SIZE * 5.0, marker="s",
+            facecolors="none", edgecolors="#d62728",
+            linewidths=1.1, alpha=0.70, zorder=3.6,
+        )
 
 
 def draw_routing_request(
@@ -399,6 +417,9 @@ def draw_atom_panel(
         [int(a.atom_id) for a in ensemble.atomtrajs], atom_colors
     )
 
+    finished = t >= ensemble.total_duration() - 1e-12
+    addressed_style: AddressedStyle = "none" if finished else style.addressed_style
+
     draw_grid_dots(ax, ensemble.grid)
     if show_routing:
         draw_routing_request(ax, ensemble, colors=colors)
@@ -406,16 +427,16 @@ def draw_atom_panel(
         ax, ensemble, t, mode=planned_trajectory, colors=colors,
         samples=style.planned_samples_per_segment,
     )
-    if style.show_motion_blur:
+    if style.show_motion_blur and not finished:
         draw_motion_blur(
             ax, ensemble, t, samples=style.trail_samples, colors=colors
         )
     draw_atoms(
         ax, ensemble, t, colors=colors,
-        addressed_style=style.addressed_style, show_atom_ids=show_atom_ids,
+        addressed_style=addressed_style, show_atom_ids=show_atom_ids,
     )
-    if sequence is not None:
-        draw_aod_traps(ax, sequence, t)
+    if sequence is not None and not finished:
+        draw_aod_traps(ax, sequence, t, addressed_style=addressed_style)
     draw_grid_frame(ax, ensemble.grid)
     ax.set_title(title or f"atom motion  -  t = {_format_time_us(t)}")
 
