@@ -31,6 +31,8 @@ from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
 from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
+from src.scheduler.ripa_pebroute import RIPAPebRouteScheduler
+from src.scheduler.ripa_stochastic_search import RIPASearchScheduler
 from src.visualization import render_animation
 
 N = 24
@@ -45,8 +47,9 @@ PREFIX = "inversion_6x6_benchmark"
 SCHEDULERS = {
     "ripa_pebble": lambda req: RIPAPebbleScheduler(req, highway_period=STORAGE_PERIOD),
     "ripa_pebble_adv": RIPAPebbleAdvScheduler,
+    "ripa_pebroute": RIPAPebRouteScheduler,
+    "ripa_search": lambda req: RIPASearchScheduler(req, n_iter=200, seed=0),
     # "ripa_pebble_b": RIPAPebbleBScheduler,
-    # "ripa_pebble_search": lambda req: RIPAPebbleSearchScheduler(req, n_iter=200, seed=0),
     "ripa_naive_sync": lambda req: RIPANaiveSyncScheduler(req, highway_period=STORAGE_PERIOD),
 }
 

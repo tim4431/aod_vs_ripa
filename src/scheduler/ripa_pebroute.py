@@ -1,59 +1,65 @@
 """Pebble-motion scheduler — uncolored / unlabeled assembly variant.
 
 Maps the routing problem to the classical CS pebble-motion problem
-(Kornhauser-Miller-Spirakis 1984; see ../pebble_scheduler.md):
+(Kornhauser-Miller-Spirakis 1984): vertices = lattice sites; pebbles =
+atoms; target = a SET of occupied sites with no per-atom binding.
 
-    vertices = lattice sites
-    pebbles  = atoms
-    target   = a SET of occupied sites (no per-atom binding)
-
-Stage A (implemented): Hungarian-assign sources to targets to minimize
-total Manhattan distance, then defer to manhattan.plan() for corridor
-selection, reservation tables, and a_max-aware timing.
+Stage A (implemented): Hungarian-assign sources to targets to minimise
+total Manhattan distance, then defer to the corridor planner in
+`_manhattan_planner.plan_labelled` for corridor selection, reservation
+tables, and a_max-aware timing.
 
 Stages B-D (planned): k-NN greedy matching, cycle-rotation planner
-(Yu & Rus 2012), ILP makespan (Yu & LaValle 2015). See md for details.
+(Yu & Rus 2012), ILP makespan (Yu & LaValle 2015).
 
-Output is a regular Schedule from manhattan.py — drop-in compatible with
-all downstream consumers (renderers, inspector, Sequence).
+Public API:
 
-Port note: this module is the project-side mirror of
-`lib/ripa2/visualization/src/schedulers/pebroute.py`. Logic is unchanged;
-only the imports use absolute lib namespace paths so the file can live in
-the project's `src/scheduler/` tree without a relative-import chain back
-into `lib/ripa2/visualization/src/`.
+* function form — `plan_uncolored`, `plan_labelled_pebble`, `assign_uncolored`
+  (used by the lib-side rendering scenes).
+* class form — `RIPAPebRouteScheduler` (a `base.Scheduler` subclass that
+  plugs into `src.benchmark.benchmark_schedulers` and the existing
+  Scheduler framework).
+
+Output is a `Schedule` whose canonical artifact is a
+`src.moving_sequence.MovingSequence`, drop-in compatible with every
+src-side validator and visualiser.
 """
+
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from lib.ripa2.visualization.src.atoms import Grid
-from lib.ripa2.visualization.src.params import Params
-from lib.ripa2.visualization.src.schedulers.manhattan import (
-    RoutingRequest,
+from ..atom_config import Grid
+from ..routing import Site
+from ._manhattan_planner import (
+    ManhattanParams,
+    RoutingMove,
     Schedule,
-    plan as _plan_labelled,
+    plan_labelled,
 )
-
-
-Site = Tuple[int, int]
+from .base import Scheduler
 
 
 # ---------------- request types ----------------
+
 
 @dataclass
 class UncoloredRequest:
     """A move whose target identity is not bound to a specific source pebble.
 
-    `sources` and `targets` must have the same length. The scheduler will pick
-    a bijection minimizing total Manhattan move distance.
+    `sources` and `targets` must have the same length. The scheduler picks a
+    bijection minimising total Manhattan move distance.
 
     `atom_ids` (optional) lets callers attach stable atom IDs to source
-    positions; the chosen bijection then propagates those IDs to the matched
-    targets. If omitted, atoms are auto-numbered 0..m-1 in source order.
+    positions; the chosen bijection then propagates those IDs to the
+    matched targets. If omitted, atoms are auto-numbered 0..m-1 in source
+    order.
     """
+
     sources: List[Site]
     targets: List[Site]
     atom_ids: Optional[List[int]] = None
@@ -63,12 +69,14 @@ class UncoloredRequest:
 @dataclass
 class Assignment:
     """Result of the bipartite-matching step (Stage A)."""
+
     pairs: List[Tuple[int, int]]              # (src_idx, tgt_idx) under the bijection
     total_cost_sites: float                   # sum of Manhattan distances in lattice steps
     cost_matrix: np.ndarray = field(repr=False)
 
 
 # ---------------- core helpers ----------------
+
 
 def _manhattan_sites(a: Site, b: Site) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
@@ -79,7 +87,7 @@ def assign_uncolored(sources: Sequence[Site],
     """Min-total-Manhattan-distance bijection sources -> targets via Hungarian.
 
     Cost matrix C[i, j] = |s_i - t_j|_1 in lattice steps. scipy's
-    linear_sum_assignment runs in O(m^3); fine for m <= ~hundreds.
+    `linear_sum_assignment` runs in O(m^3); fine for m <= ~hundreds.
     """
     if len(sources) != len(targets):
         raise ValueError(
@@ -102,24 +110,33 @@ def assign_uncolored(sources: Sequence[Site],
 
 # ---------------- scheduler entry points ----------------
 
-def plan_uncolored(req: UncoloredRequest,
-                   grid: Grid,
-                   params: Params,
+
+def _validate_storage_parity(req: UncoloredRequest) -> None:
+    """The Manhattan-corridor planner assumes atoms live on even/even sites
+    (storage parity). Reject mismatches up front so the failure mode is
+    clear rather than mysterious-collision later."""
+    for s in req.sources:
+        if s[0] % 2 != 0 or s[1] % 2 != 0:
+            raise ValueError(f"source {s} is not on a storage (even, even) site")
+    for t in req.targets:
+        if t[0] % 2 != 0 or t[1] % 2 != 0:
+            raise ValueError(f"target {t} is not on a storage (even, even) site")
+
+
+def plan_uncolored(req: UncoloredRequest, grid: Grid,
+                   *,
+                   params: Optional[ManhattanParams] = None,
                    t0_global: float = 0.0,
                    static_sites: Optional[Sequence[Site]] = None,
+                   collision_dt: float = 1e-6,
                    verbose: bool = False) -> Tuple[Schedule, Assignment]:
     """Stage A: Hungarian-matched uncolored pebble scheduling.
 
-    Returns (schedule, assignment). The schedule is a regular
-    `scheduler.Schedule` — pass straight to renderers / Sequence.
-    The assignment is exposed so callers can audit which atom went where.
+    Returns ``(schedule, assignment)``. The schedule wraps a
+    `MovingSequence`; the assignment is exposed so callers can audit
+    which atom was sent to which target.
     """
-    for s in req.sources:
-        if not grid.is_storage_site(*s):
-            raise ValueError(f"source {s} is not on a storage (even, even) site")
-    for t in req.targets:
-        if not grid.is_storage_site(*t):
-            raise ValueError(f"target {t} is not on a storage (even, even) site")
+    _validate_storage_parity(req)
 
     assignment = assign_uncolored(req.sources, req.targets)
 
@@ -130,8 +147,8 @@ def plan_uncolored(req: UncoloredRequest,
             raise ValueError("atom_ids length must match sources")
         atom_ids = list(req.atom_ids)
 
-    requests = [
-        RoutingRequest(
+    moves = [
+        RoutingMove(
             atom_id=atom_ids[i],
             src=req.sources[i],
             dst=req.targets[j],
@@ -141,44 +158,50 @@ def plan_uncolored(req: UncoloredRequest,
     ]
 
     if verbose:
-        print(f"plan_uncolored: matched {len(requests)} pebbles, "
+        print(f"plan_uncolored: matched {len(moves)} pebbles, "
               f"total Manhattan cost = {assignment.total_cost_sites:.1f} sites")
         for i, j in assignment.pairs:
             print(f"  atom {atom_ids[i]}: {req.sources[i]} -> {req.targets[j]}  "
                   f"(d = {assignment.cost_matrix[i, j]:.0f})")
 
-    schedule = _plan_labelled(
-        requests, grid, params,
+    schedule = plan_labelled(
+        moves, grid,
+        params=params,
         t0_global=t0_global,
         static_sites=static_sites,
+        collision_dt=collision_dt,
         verbose=verbose,
     )
     return schedule, assignment
 
 
-def plan_labelled_pebble(requests: Sequence[RoutingRequest],
-                         grid: Grid,
-                         params: Params,
+def plan_labelled_pebble(moves: Sequence[RoutingMove], grid: Grid,
+                         *,
+                         params: Optional[ManhattanParams] = None,
                          t0_global: float = 0.0,
                          static_sites: Optional[Sequence[Site]] = None,
+                         collision_dt: float = 1e-6,
                          verbose: bool = False) -> Schedule:
     """Stage A passthrough for the labelled case.
 
     Provided so downstream code can route every scheduling call through
-    pebble_scheduler.* without caring whether the scene is labelled or
-    uncolored. Behaves identically to scheduler.plan().
+    `pebble.*` without caring whether the scene is labelled or uncolored.
+    Behaves identically to `ripa_manhattan.plan_labelled`.
     """
-    return _plan_labelled(
-        list(requests), grid, params,
+    return plan_labelled(
+        list(moves), grid,
+        params=params,
         t0_global=t0_global,
         static_sites=static_sites,
+        collision_dt=collision_dt,
         verbose=verbose,
     )
 
 
 # ---------------- stage stubs (planned) ----------------
 
-def plan_uncolored_greedy(req: UncoloredRequest, grid: Grid, params: Params,
+
+def plan_uncolored_greedy(req: UncoloredRequest, grid: Grid,
                           **kwargs) -> Tuple[Schedule, Assignment]:
     """Stage B (planned): k-NN greedy matching as a cheaper alternative to
     Hungarian for very large m. Not implemented yet.
@@ -189,7 +212,7 @@ def plan_uncolored_greedy(req: UncoloredRequest, grid: Grid, params: Params,
     )
 
 
-def plan_cycle_rotation(req: UncoloredRequest, grid: Grid, params: Params,
+def plan_cycle_rotation(req: UncoloredRequest, grid: Grid,
                         **kwargs) -> Tuple[Schedule, Assignment]:
     """Stage C (planned): detect cycles in the source->target permutation and
     rotate them through a buffered corridor cell (Yu & Rus 2012).
@@ -201,7 +224,7 @@ def plan_cycle_rotation(req: UncoloredRequest, grid: Grid, params: Params,
     )
 
 
-def plan_makespan_ilp(req: UncoloredRequest, grid: Grid, params: Params,
+def plan_makespan_ilp(req: UncoloredRequest, grid: Grid,
                       **kwargs) -> Tuple[Schedule, Assignment]:
     """Stage D (planned): time-optimal ILP / network-flow scheduling
     (Yu & LaValle 2015). Heavy; intended as a benchmark oracle.
@@ -210,3 +233,60 @@ def plan_makespan_ilp(req: UncoloredRequest, grid: Grid, params: Params,
     raise NotImplementedError(
         "Stage D (ILP makespan) not implemented; reference oracle only."
     )
+
+
+# ---------------- Scheduler-class wrapper ----------------
+
+
+@dataclass
+class RIPAPebRouteScheduler(Scheduler):
+    """`base.Scheduler` adapter for the Hungarian + Manhattan-corridor planner.
+
+    Handles both labeled and unlabeled `RoutingRequest`s. For the unlabeled
+    case it picks the Hungarian-optimal source→target bijection first, then
+    delegates to the same corridor planner used by the labeled case.
+
+    Use this class when you want the scheduler to plug into
+    `src.benchmark.benchmark_schedulers` or any other framework that expects
+    a `Scheduler.plan()` method returning a `MovingSequence`. For raw
+    function-form access, call `plan_uncolored` / `plan_labelled_pebble`
+    directly — they bypass the base class entirely.
+    """
+
+    params: Optional[ManhattanParams] = None
+    static_sites: Optional[Sequence[Site]] = None
+
+    def _plan(self) -> None:
+        params = self.params or ManhattanParams()
+
+        if self.request.labeled:
+            moves = [
+                RoutingMove(
+                    atom_id=k,
+                    src=tuple(self.request.src[k]),
+                    dst=tuple(self.request.dst[k]),
+                )
+                for k in range(len(self.request.src))
+            ]
+        else:
+            assignment = assign_uncolored(self.request.src, self.request.dst)
+            moves = [
+                RoutingMove(
+                    atom_id=i,
+                    src=tuple(self.request.src[i]),
+                    dst=tuple(self.request.dst[j]),
+                )
+                for (i, j) in assignment.pairs
+            ]
+
+        # Plan into the MovingSequence the base class already prepared from
+        # `request.initial`. The planner appends segments to that sequence in
+        # place, so `self.sequence` ends up holding the result without any
+        # post-hoc swap.
+        plan_labelled(
+            moves, self.request.grid,
+            params=params,
+            static_sites=self.static_sites,
+            collision_dt=self.collision_dt,
+            sequence=self.sequence,
+        )
