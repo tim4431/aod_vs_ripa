@@ -267,6 +267,44 @@ class AsyncScheduler(Scheduler):
     """Marker base for future schedulers with independently timed moves."""
 
 
+@dataclass
+class LabeledScheduler(Scheduler):
+    """Base class for schedulers that handle labeled (pairwise) requests.
+
+    A labeled scheduler routes the atom currently at `src[k]` to `dst[k]`.
+    The request must have `labeled=True`; an unlabeled set→set request must
+    first be wrapped by an `UnlabeledScheduler` that picks an atom→target
+    assignment.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.request.labeled:
+            raise ValueError(
+                f"{type(self).__name__} requires a labeled RoutingRequest "
+                "(labeled=True); wrap it in an UnlabeledScheduler to assign "
+                "atoms to targets first."
+            )
+
+
+@dataclass
+class UnlabeledScheduler(Scheduler):
+    """Base class for schedulers that handle unlabeled (set→set) requests.
+
+    An unlabeled scheduler may choose any bijection from `src` to `dst`. A
+    common implementation picks an atom→target assignment and delegates the
+    resulting labeled problem to a `LabeledScheduler`.
+    """
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.request.labeled:
+            raise ValueError(
+                f"{type(self).__name__} expects an unlabeled RoutingRequest "
+                "(labeled=False)."
+            )
+
+
 def _greedy_nearest_assignment(
     sources: Iterable[Site],
     targets: Iterable[Site],

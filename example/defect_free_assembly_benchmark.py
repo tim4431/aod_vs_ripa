@@ -28,7 +28,7 @@ from src.routing import (
     stochastically_loaded_sites,
 )
 from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
-from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
+from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.visualization import render_animation
 
 N = 10
@@ -41,7 +41,7 @@ PREFIX = "defect_free_assembly_benchmark"
 
 # Dict order = panel order (RIPA left, AOD right). Keys also become panel labels.
 SCHEDULERS = {
-    "RIPA pebble adv": RIPAPebbleAdvScheduler,
+    "RIPA pebble adv": UnlabeledRIPAPebbleAdvScheduler,
     "AOD sqrt-time": SqrtTimeAODScheduler,
 }
 

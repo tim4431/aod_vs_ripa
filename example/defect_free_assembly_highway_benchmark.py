@@ -26,7 +26,7 @@ from src.routing import RoutingRequest
 from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
 from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
 from src.scheduler.ripa_pebble import RIPAPebbleScheduler
-from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
+from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.visualization import render_animation
 
 N = 20
@@ -48,8 +48,8 @@ SCHEDULERS = {
         req, time_limit=10.0, max_high_level_nodes=5_000,
     ),
     "ripa_pebble": lambda req: RIPAPebbleScheduler(req, highway_period=STORAGE_PERIOD),
-    "ripa_pebble_adv": RIPAPebbleAdvScheduler,
-    "ripa_pebble_adv_min_max": lambda req: RIPAPebbleAdvScheduler(
+    "ripa_pebble_adv": UnlabeledRIPAPebbleAdvScheduler,
+    "ripa_pebble_adv_min_max": lambda req: UnlabeledRIPAPebbleAdvScheduler(
         req, unlabeled_assignment="min_max",
     ),
     "ripa_naive_sync": lambda req: RIPANaiveSyncScheduler(req, highway_period=STORAGE_PERIOD),

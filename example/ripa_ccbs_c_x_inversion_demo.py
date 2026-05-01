@@ -1,4 +1,4 @@
-"""Staged C++ CCBS demo for a 6x6 x-inversion.
+"""Async-layered C++ CCBS demo for a 6x6 x-inversion.
 
 The demo places a 6x6 atom array on storage sites inside a larger RIPA grid:
 for the default period=2/margin=1 setup, atoms sit on odd sites of a 13x13
@@ -8,8 +8,9 @@ x-inversion, so the atom at storage coordinate (x, y) ends at
 
 The full 36-agent one-shot CCBS search is a useful stress case but usually
 times out with the current exact backend.  The default demo therefore performs
-the same labeled inversion as staged pair swaps, with each stage solved by the
-C++ CCBS backend while all other atoms are treated as static blockers.
+the same labeled inversion as CCBS-planned pair swaps, then launches
+geometrically independent swaps in the same master time layer. Adjacent columns
+share highway lanes, so the async layers use column parity groups.
 
 Run:
     conda run -n claude python example/ripa_ccbs_c_x_inversion_demo.py
@@ -45,9 +46,11 @@ PREFIX = "ripa_ccbs_c_x_inversion_6x6"
 @dataclass(frozen=True)
 class StageStats:
     index: int
+    layer: int
     label: str
     atom_a: int
     atom_b: int
+    start_time: float
     duration: float
     high_level_expanded: int
     high_level_generated: int
@@ -136,6 +139,7 @@ def build_staged_x_inversion(
     margin: int,
     time_limit: float,
     max_high_level_nodes: int,
+    async_layers: bool,
 ) -> tuple[Sequence, list[StageStats], list[Site]]:
     grid = Grid(
         N=grid_size(side, period, margin),
@@ -152,45 +156,64 @@ def build_staged_x_inversion(
     stage_stats: list[StageStats] = []
 
     stage_index = 0
-    for j in range(side):
-        for low in range(side // 2):
-            high = side - 1 - low
-            atom_a = atom_id_for_storage_site(side, low, j)
-            atom_b = atom_id_for_storage_site(side, high, j)
+    layer_index = 0
+    for low in range(side // 2):
+        high = side - 1 - low
+        column_groups = (
+            [list(range(0, side, 2)), list(range(1, side, 2))]
+            if async_layers
+            else [[j] for j in range(side)]
+        )
+        for columns in column_groups:
             current_by_atom = master.final_config().site_of_atom()
             current = [current_by_atom[atom_id] for atom_id in range(side * side)]
-            stage_sequence, scheduler = solve_swap_stage(
-                grid=grid,
-                current=current,
-                atom_a=atom_a,
-                atom_b=atom_b,
-                time_limit=time_limit,
-                max_high_level_nodes=max_high_level_nodes,
-            )
-
-            offset = master.next_start_time()
-            for step in stage_sequence.steps:
-                master.append(shifted_step(step, offset))
-
-            solution = scheduler.ccbs_solution
-            if solution is None or not solution.found:
-                raise RuntimeError(f"stage {stage_index} did not produce a CCBS solution")
-            stage_stats.append(
-                StageStats(
-                    index=stage_index,
-                    label=f"col {j}, rows {low}<->{high}",
+            planned: list[tuple[int, int, int, Sequence, RIPACCBSCScheduler]] = []
+            for j in columns:
+                atom_a = atom_id_for_storage_site(side, low, j)
+                atom_b = atom_id_for_storage_site(side, high, j)
+                stage_sequence, scheduler = solve_swap_stage(
+                    grid=grid,
+                    current=current,
                     atom_a=atom_a,
                     atom_b=atom_b,
-                    duration=stage_sequence.total_duration(),
-                    high_level_expanded=solution.high_level_expanded,
-                    high_level_generated=solution.high_level_generated,
-                    segments=sum(
-                        len(atom.segments)
-                        for atom in stage_sequence.ensemble.atomtrajs
-                    ),
+                    time_limit=time_limit,
+                    max_high_level_nodes=max_high_level_nodes,
                 )
-            )
-            stage_index += 1
+                planned.append((j, atom_a, atom_b, stage_sequence, scheduler))
+
+            # All swaps in this group are independent under the storage/highway
+            # geometry, so they share a master start time. Appending each CCBS
+            # plan step still validates the combined RIPA timeline.
+            offset = master.next_start_time()
+            for _j, _atom_a, _atom_b, stage_sequence, _scheduler in planned:
+                for step in stage_sequence.steps:
+                    master.append(shifted_step(step, offset))
+
+            for j, atom_a, atom_b, stage_sequence, scheduler in planned:
+                solution = scheduler.ccbs_solution
+                if solution is None or not solution.found:
+                    raise RuntimeError(
+                        f"stage {stage_index} did not produce a CCBS solution"
+                    )
+                stage_stats.append(
+                    StageStats(
+                        index=stage_index,
+                        layer=layer_index,
+                        label=f"col {j}, rows {low}<->{high}",
+                        atom_a=atom_a,
+                        atom_b=atom_b,
+                        start_time=offset,
+                        duration=stage_sequence.total_duration(),
+                        high_level_expanded=solution.high_level_expanded,
+                        high_level_generated=solution.high_level_generated,
+                        segments=sum(
+                            len(atom.segments)
+                            for atom in stage_sequence.ensemble.atomtrajs
+                        ),
+                    )
+                )
+                stage_index += 1
+            layer_index += 1
 
     assert_x_inversion(master, targets)
     return master, stage_stats, targets
@@ -233,10 +256,15 @@ def try_one_shot(
 
 
 def print_stage_table(stats: list[StageStats]) -> None:
-    print("stage  swap                 atoms      duration_us  expanded  generated  segments")
+    print(
+        "stage  layer  start_us   swap                 atoms      "
+        "duration_us  expanded  generated  segments"
+    )
     for stat in stats:
         print(
-            f"{stat.index:>5}  {stat.label:<20} "
+            f"{stat.index:>5}  {stat.layer:>5}  "
+            f"{stat.start_time * 1e6:>8.3f}  "
+            f"{stat.label:<20} "
             f"{stat.atom_a:>2}<->{stat.atom_b:<2} "
             f"{stat.duration * 1e6:>11.3f}  "
             f"{stat.high_level_expanded:>8}  "
@@ -252,6 +280,11 @@ def main() -> None:
     parser.add_argument("--margin", type=int, default=DEFAULT_MARGIN)
     parser.add_argument("--time-limit", type=float, default=5.0)
     parser.add_argument("--max-high-level-nodes", type=int, default=50_000)
+    parser.add_argument(
+        "--serial",
+        action="store_true",
+        help="serialize every pair swap instead of using parity async layers",
+    )
     parser.add_argument(
         "--try-one-shot",
         action="store_true",
@@ -302,17 +335,20 @@ def main() -> None:
         margin=args.margin,
         time_limit=args.time_limit,
         max_high_level_nodes=args.max_high_level_nodes,
+        async_layers=not args.serial,
     )
 
+    layer_count = len({stat.layer for stat in stats})
+    mode = "serial" if args.serial else "async parity-layered"
     print(
-        f"staged {args.side}x{args.side} x-inversion on "
+        f"{mode} {args.side}x{args.side} x-inversion on "
         f"{grid_size(args.side, args.period, args.margin)}x"
         f"{grid_size(args.side, args.period, args.margin)} RIPA grid"
     )
     print_stage_table(stats)
     print(
         f"total_duration_us={sequence.total_duration() * 1e6:.3f}, "
-        f"stages={len(stats)}"
+        f"stages={len(stats)}, layers={layer_count}"
     )
 
     if args.no_render:
@@ -329,7 +365,7 @@ def main() -> None:
         planned_trajectory="next",
         show_atom_ids=args.show_atom_ids,
         show_routing_on_start=True,
-        title=f"C++ CCBS staged {args.side}x{args.side} x-inversion",
+        title=f"C++ CCBS {mode} {args.side}x{args.side} x-inversion",
     )
     print(f"wrote {args.output}")
 

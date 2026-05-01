@@ -7,10 +7,10 @@ any site visible along its row or column without crossing an occupied site.
 
 The route graph therefore discovers long clear corridors when the atom
 configuration happens to provide them, but it does not manufacture highways by
-convention. For unlabeled target-set assembly, the scheduler compacts atoms
-inward: atoms already in the target region are kept whenever possible, empty
-interior sites are filled first, and vacancies are slid outward rather than
-evacuating the whole target region.
+convention. The scheduler is labeled-only: an atom at `src[k]` is routed to
+`dst[k]`. For unlabeled set→set requests, wrap it in
+`UnlabeledRIPAPebbleAdvScheduler`, which picks an atom→target assignment
+(min_sum or min_max) and delegates the resulting labeled problem here.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ from typing import Callable, Iterable, Literal
 
 from ..atom_trajectory import CollisionError
 from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
-from ..routing import Site
+from ..routing import RoutingRequest, Site
 from ..segments import bang_bang_duration
-from .base import AsyncScheduler
+from .base import AsyncScheduler, LabeledScheduler, UnlabeledScheduler
 
 Channel = Literal["row", "col"]
 
@@ -39,15 +39,14 @@ class RIPAPebbleAdvLeg:
 
 
 @dataclass
-class RIPAPebbleAdvScheduler(AsyncScheduler):
-    """Asynchronous RIPA scheduler with no assumed highway lattice.
+class RIPAPebbleAdvScheduler(LabeledScheduler, AsyncScheduler):
+    """Labeled asynchronous RIPA scheduler with no assumed highway lattice.
 
     The planner uses current occupancy as a dynamic obstacle map. Long clear
     row/column moves are preferred because each candidate edge is costed by the
     physical bang-bang duration rather than by unit grid hops.
     """
 
-    max_exact_unlabeled_atoms: int = 12
     max_start_attempts: int = 32
     wait_increment: float | None = None
     wait_padding: float | None = None
@@ -55,10 +54,6 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     staged_target_fill: bool = True
     async_staging: bool = True
     """Use per-atom async starts for staged moves; false serializes each staged leg."""
-    unlabeled_assignment: Literal["min_sum", "min_max"] = "min_sum"
-    """Unlabeled cost-matrix objective. `min_max` (bottleneck) bounds the
-    longest single-atom path so atoms already in target slots also get moved
-    when that helps the makespan; ties are broken by min total cost."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -66,59 +61,21 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             raise ValueError("max_start_attempts must be >= 1")
         if self.handoff_weight < 0:
             raise ValueError("handoff_weight must be non-negative")
-        if self.unlabeled_assignment not in ("min_sum", "min_max"):
-            raise ValueError("unlabeled_assignment must be 'min_sum' or 'min_max'")
-
-    def target_assignment(self) -> dict[int, Site]:
-        """Assign unlabeled atoms by geometry-route cost."""
-        if self.request.labeled:
-            return super().target_assignment()
-
-        sources = [tuple(site) for site in self.request.src]
-        targets = [tuple(site) for site in self.request.dst]
-        n = len(sources)
-        if n == 0:
-            return {}
-
-        costs = [
-            [self._estimated_pair_cost(atom_id, src, dst) for dst in targets]
-            for atom_id, src in enumerate(sources)
-        ]
-        if self.unlabeled_assignment == "min_max":
-            bottleneck = self._bottleneck_assignment(costs, targets)
-            if bottleneck is not None:
-                return bottleneck
-        if n <= self.max_exact_unlabeled_atoms:
-            return self._exact_min_cost_assignment(costs, targets)
-        linear_assignment = self._linear_sum_assignment(costs, targets)
-        if linear_assignment is not None:
-            return linear_assignment
-        return self._greedy_min_cost_assignment(costs, targets)
 
     def _plan(self) -> None:
-        # Staged compaction does its own greedy moves and bypasses
-        # target_assignment(); skip it under min_max so the bottleneck
-        # assignment actually drives routing.
         use_staged = (
             self.staged_target_fill
-            and not (not self.request.labeled and self.unlabeled_assignment == "min_max")
             and len(self.request.dst) == len(self.request.src)
             and len(self.request.dst)
             <= (self.request.grid.N * self.request.grid.N) // 2
         )
         if use_staged:
-            if self.request.labeled:
-                self._plan_labeled_target_set_with_fallback()
-            else:
-                self._plan_unlabeled_target_set_with_fallback()
+            self._plan_labeled_target_set_with_fallback()
             return
 
         self._plan_assigned_routes(self.target_assignment())
 
     # ---- staged target-set assembly ---------------------------------------
-
-    def _plan_unlabeled_target_set_with_fallback(self) -> None:
-        self._run_staged_with_fallback(self._plan_unlabeled_target_set)
 
     def _plan_labeled_target_set_with_fallback(self) -> None:
         self._run_staged_with_fallback(self._plan_labeled_target_set)
@@ -144,123 +101,6 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     def _reset_sequence(self) -> None:
         super().__post_init__()
         self.last_error = None
-
-    def _plan_unlabeled_target_set(self) -> None:
-        target_sites = {tuple(site) for site in self.request.dst}
-        depths = self._target_depths(target_sites)
-
-        self._compact_unlabeled_target_set(target_sites, depths)
-
-    def _compact_unlabeled_target_set(
-        self,
-        target_sites: set[Site],
-        depths: dict[Site, int],
-    ) -> None:
-        max_rounds = max(
-            1,
-            8 * self.request.grid.N * self.request.grid.N * max(1, len(target_sites)),
-        )
-        for _ in range(max_rounds):
-            occ = self._final_occupancy()
-            if target_sites <= set(occ):
-                return
-
-            move = self._best_unlabeled_compaction_move(target_sites, depths, occ)
-            if move is not None:
-                atom_id, path = move
-                self._append_path(
-                    atom_id,
-                    path,
-                    sequential=not self.async_staging,
-                )
-                continue
-
-            if self._relieve_target_gate(target_sites, occ):
-                continue
-
-            raise RuntimeError(
-                "RIPAPebbleAdvScheduler could not compact the unlabeled target set"
-            )
-
-        raise RuntimeError("RIPAPebbleAdvScheduler exceeded unlabeled compaction rounds")
-
-    def _best_unlabeled_compaction_move(
-        self,
-        target_sites: set[Site],
-        depths: dict[Site, int],
-        occ: dict[Site, int],
-    ) -> tuple[int, list[Site]] | None:
-        occupied = set(occ)
-        empty_targets = sorted(
-            target_sites - occupied,
-            key=lambda site: (-depths[site], site),
-        )
-
-        for target in empty_targets:
-            move = self._best_outside_to_target_move(target, target_sites, occ)
-            if move is not None:
-                return move
-
-            move = self._best_inward_target_slide(target, target_sites, depths, occ)
-            if move is not None:
-                return move
-
-        return None
-
-    def _best_outside_to_target_move(
-        self,
-        target: Site,
-        target_sites: set[Site],
-        occ: dict[Site, int],
-    ) -> tuple[int, list[Site]] | None:
-        best: tuple[float, int, list[Site]] | None = None
-        for site, atom_id in occ.items():
-            if site in target_sites:
-                continue
-            path = self._shortest_path(atom_id, site, target, occ)
-            if path is None:
-                continue
-            key = (self._path_cost(path), atom_id, path)
-            if best is None or key[:2] < best[:2]:
-                best = key
-
-        if best is None:
-            return None
-        _, atom_id, path = best
-        return atom_id, path
-
-    def _best_inward_target_slide(
-        self,
-        target: Site,
-        target_sites: set[Site],
-        depths: dict[Site, int],
-        occ: dict[Site, int],
-    ) -> tuple[int, list[Site]] | None:
-        target_depth = depths[target]
-        best: tuple[int, float, int, list[Site]] | None = None
-        for site, atom_id in occ.items():
-            if site not in target_sites:
-                continue
-            source_depth = depths[site]
-            if source_depth >= target_depth:
-                continue
-            path = self._shortest_path(
-                atom_id,
-                site,
-                target,
-                occ,
-                allowed_sites=target_sites,
-            )
-            if path is None:
-                continue
-            key = (source_depth, self._path_cost(path), atom_id, path)
-            if best is None or key[:3] < best[:3]:
-                best = key
-
-        if best is None:
-            return None
-        _, _, atom_id, path = best
-        return atom_id, path
 
     # ---- labeled staged routing -------------------------------------------
 
@@ -732,19 +572,320 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     def _manhattan(a: Site, b: Site) -> int:
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
-    # ---- assignment helpers ------------------------------------------------
 
-    def _estimated_pair_cost(self, atom_id: int, src: Site, dst: Site) -> float:
+RIPAPebbleGeometryScheduler = RIPAPebbleAdvScheduler
+
+
+@dataclass
+class UnlabeledRIPAPebbleAdvScheduler(UnlabeledScheduler, AsyncScheduler):
+    """Unlabeled wrapper around `RIPAPebbleAdvScheduler`.
+
+    Two routing modes, mirroring the prior behavior of the combined scheduler:
+
+    * **Staged compaction** (default when `staged_target_fill=True`,
+      `unlabeled_assignment="min_sum"`, and the target fits in half the grid).
+      Greedy moves are picked from the current geometry without committing to a
+      fixed atom→target pairing, so atoms already in target slots can slide
+      inward to make room for incoming atoms.
+    * **Assignment-based** (when staged compaction is disabled or
+      `unlabeled_assignment="min_max"`). Picks an atom→target assignment from
+      the unlabeled request and delegates the resulting labeled problem to
+      `RIPAPebbleAdvScheduler`.
+    """
+
+    unlabeled_assignment: Literal["min_sum", "min_max"] = "min_sum"
+    """Cost-matrix objective for the assignment-based path. `min_max`
+    (bottleneck) bounds the longest single-atom path so atoms already in
+    target slots also get moved when that helps the makespan; ties are broken
+    by min total cost. Selecting `min_max` also forces the assignment-based
+    path even when `staged_target_fill=True`."""
+    max_exact_unlabeled_atoms: int = 12
+
+    # Pass-through configuration for the inner labeled scheduler.
+    max_start_attempts: int = 32
+    wait_increment: float | None = None
+    wait_padding: float | None = None
+    handoff_weight: float = 0.35
+    staged_target_fill: bool = True
+    async_staging: bool = True
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.unlabeled_assignment not in ("min_sum", "min_max"):
+            raise ValueError("unlabeled_assignment must be 'min_sum' or 'min_max'")
+
+    def _plan(self) -> None:
+        if not self.request.src:
+            return
+
+        use_staged = (
+            self.staged_target_fill
+            and self.unlabeled_assignment != "min_max"
+            and len(self.request.dst) == len(self.request.src)
+            and len(self.request.dst)
+            <= (self.request.grid.N * self.request.grid.N) // 2
+        )
+        if use_staged:
+            self._plan_staged_compaction_with_fallback()
+        else:
+            self._plan_via_assignment()
+
+    # ---- assignment-based path --------------------------------------------
+
+    def _plan_via_assignment(self) -> None:
+        assignment = self.target_assignment()
+        labeled_dst = [
+            tuple(assignment[atom_id]) for atom_id in range(len(self.request.src))
+        ]
+        labeled_request = RoutingRequest(
+            grid=self.request.grid,
+            src=[tuple(s) for s in self.request.src],
+            dst=labeled_dst,
+            labeled=True,
+        )
+        # Force per-atom routing on the assignment we picked: the old combined
+        # scheduler short-circuited `use_staged=False` for this path, so the
+        # labeled clear-and-fill machinery never ran on top of it. Mirror that
+        # by disabling staged_target_fill on the inner labeled scheduler.
+        labeled = self._make_labeled_scheduler(
+            labeled_request,
+            staged_target_fill=False,
+        )
+        labeled.plan()
+        self.sequence = labeled.sequence
+
+    def target_assignment(self) -> dict[int, Site]:
+        sources = [tuple(site) for site in self.request.src]
+        targets = [tuple(site) for site in self.request.dst]
+        n = len(sources)
+        if n == 0:
+            return {}
+
+        helper = self._cost_helper()
+        costs = [
+            [self._estimated_pair_cost(helper, atom_id, src, dst) for dst in targets]
+            for atom_id, src in enumerate(sources)
+        ]
+        if self.unlabeled_assignment == "min_max":
+            bottleneck = self._bottleneck_assignment(costs, targets)
+            if bottleneck is not None:
+                return bottleneck
+        if n <= self.max_exact_unlabeled_atoms:
+            return self._exact_min_cost_assignment(costs, targets)
+        linear_assignment = self._linear_sum_assignment(costs, targets)
+        if linear_assignment is not None:
+            return linear_assignment
+        return self._greedy_min_cost_assignment(costs, targets)
+
+    # ---- staged unlabeled compaction --------------------------------------
+
+    def _plan_staged_compaction_with_fallback(self) -> None:
+        original_async = self.async_staging
+        if not original_async:
+            self._plan_staged_compaction()
+            return
+
+        try:
+            self._plan_staged_compaction()
+            return
+        except RuntimeError:
+            pass
+
+        self.async_staging = False
+        try:
+            self._plan_staged_compaction()
+        finally:
+            self.async_staging = original_async
+
+    def _plan_staged_compaction(self) -> None:
+        helper = self._make_labeled_scheduler(
+            self._identity_labeled_request(),
+            validate_final=False,
+        )
+        target_sites = {tuple(site) for site in self.request.dst}
+        depths = helper._target_depths(target_sites)
+        self._compact_target_set(helper, target_sites, depths)
+        self.sequence = helper.sequence
+
+    def _compact_target_set(
+        self,
+        helper: RIPAPebbleAdvScheduler,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+    ) -> None:
+        max_rounds = max(
+            1,
+            8 * self.request.grid.N * self.request.grid.N * max(1, len(target_sites)),
+        )
+        for _ in range(max_rounds):
+            occ = helper._final_occupancy()
+            if target_sites <= set(occ):
+                return
+
+            move = self._best_compaction_move(helper, target_sites, depths, occ)
+            if move is not None:
+                atom_id, path = move
+                helper._append_path(
+                    atom_id,
+                    path,
+                    sequential=not self.async_staging,
+                )
+                continue
+
+            if helper._relieve_target_gate(target_sites, occ):
+                continue
+
+            raise RuntimeError(
+                "UnlabeledRIPAPebbleAdvScheduler could not compact the target set"
+            )
+
+        raise RuntimeError(
+            "UnlabeledRIPAPebbleAdvScheduler exceeded compaction rounds"
+        )
+
+    def _best_compaction_move(
+        self,
+        helper: RIPAPebbleAdvScheduler,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        occupied = set(occ)
+        empty_targets = sorted(
+            target_sites - occupied,
+            key=lambda site: (-depths[site], site),
+        )
+
+        for target in empty_targets:
+            move = self._best_outside_to_target_move(
+                helper, target, target_sites, occ
+            )
+            if move is not None:
+                return move
+
+            move = self._best_inward_target_slide(
+                helper, target, target_sites, depths, occ
+            )
+            if move is not None:
+                return move
+
+        return None
+
+    @staticmethod
+    def _best_outside_to_target_move(
+        helper: RIPAPebbleAdvScheduler,
+        target: Site,
+        target_sites: set[Site],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        best: tuple[float, int, list[Site]] | None = None
+        for site, atom_id in occ.items():
+            if site in target_sites:
+                continue
+            path = helper._shortest_path(atom_id, site, target, occ)
+            if path is None:
+                continue
+            key = (helper._path_cost(path), atom_id, path)
+            if best is None or key[:2] < best[:2]:
+                best = key
+
+        if best is None:
+            return None
+        _, atom_id, path = best
+        return atom_id, path
+
+    @staticmethod
+    def _best_inward_target_slide(
+        helper: RIPAPebbleAdvScheduler,
+        target: Site,
+        target_sites: set[Site],
+        depths: dict[Site, int],
+        occ: dict[Site, int],
+    ) -> tuple[int, list[Site]] | None:
+        target_depth = depths[target]
+        best: tuple[int, float, int, list[Site]] | None = None
+        for site, atom_id in occ.items():
+            if site not in target_sites:
+                continue
+            source_depth = depths[site]
+            if source_depth >= target_depth:
+                continue
+            path = helper._shortest_path(
+                atom_id,
+                site,
+                target,
+                occ,
+                allowed_sites=target_sites,
+            )
+            if path is None:
+                continue
+            key = (source_depth, helper._path_cost(path), atom_id, path)
+            if best is None or key[:3] < best[:3]:
+                best = key
+
+        if best is None:
+            return None
+        _, _, atom_id, path = best
+        return atom_id, path
+
+    # ---- helpers ----------------------------------------------------------
+
+    def _make_labeled_scheduler(
+        self,
+        labeled_request: RoutingRequest,
+        *,
+        validate_final: bool = False,
+        staged_target_fill: bool | None = None,
+    ) -> RIPAPebbleAdvScheduler:
+        return RIPAPebbleAdvScheduler(
+            request=labeled_request,
+            inter_step_gap=self.inter_step_gap,
+            collision_dt=self.collision_dt,
+            validate_final=validate_final,
+            max_start_attempts=self.max_start_attempts,
+            wait_increment=self.wait_increment,
+            wait_padding=self.wait_padding,
+            handoff_weight=self.handoff_weight,
+            staged_target_fill=(
+                self.staged_target_fill
+                if staged_target_fill is None
+                else staged_target_fill
+            ),
+            async_staging=self.async_staging,
+        )
+
+    def _identity_labeled_request(self) -> RoutingRequest:
+        return RoutingRequest(
+            grid=self.request.grid,
+            src=[tuple(s) for s in self.request.src],
+            dst=[tuple(s) for s in self.request.src],
+            labeled=True,
+        )
+
+    def _cost_helper(self) -> RIPAPebbleAdvScheduler:
+        """Labeled scheduler with an identity placeholder assignment whose
+        path-search primitives we use to score candidate atom→target pairings.
+        """
+        return self._make_labeled_scheduler(self._identity_labeled_request())
+
+    @staticmethod
+    def _estimated_pair_cost(
+        helper: RIPAPebbleAdvScheduler,
+        atom_id: int,
+        src: Site,
+        dst: Site,
+    ) -> float:
         if src == dst:
             return 0.0
-        occ = self._final_occupancy()
-        path = self._shortest_path(atom_id, tuple(src), tuple(dst), occ)
+        occ = helper._final_occupancy()
+        path = helper._shortest_path(atom_id, tuple(src), tuple(dst), occ)
+        unit = helper._unit_leg_duration()
         if path is None:
             return (
-                1000.0 * self._unit_leg_duration()
-                + self._manhattan(tuple(src), tuple(dst)) * self._unit_leg_duration()
+                1000.0 * unit
+                + helper._manhattan(tuple(src), tuple(dst)) * unit
             )
-        return self._path_cost(path)
+        return helper._path_cost(path)
 
     @staticmethod
     def _exact_min_cost_assignment(
@@ -843,6 +984,3 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             int(atom_id): targets[int(target_idx)]
             for atom_id, target_idx in zip(row_ind, col_ind)
         }
-
-
-RIPAPebbleGeometryScheduler = RIPAPebbleAdvScheduler
