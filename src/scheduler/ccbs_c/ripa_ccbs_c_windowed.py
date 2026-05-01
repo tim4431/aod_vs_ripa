@@ -15,8 +15,7 @@ from typing import Iterable
 from ...moving_sequence import MovingSequence
 from ...movement import Step
 from ...routing import RoutingRequest, Site
-from ..ripa_ccbs_c import RIPACCBSCScheduler
-from ..ripa_ccbs_common import CCBSSolution
+from .ripa_ccbs_c import CCBSSolution, RIPACCBSCScheduler
 
 Axis = int
 Swap = tuple[int, int]
@@ -74,7 +73,7 @@ class _WindowPlan:
 
 
 @dataclass
-class RIPACCBSDWindowedScheduler(RIPACCBSCScheduler):
+class RIPACCBSWindowedScheduler(RIPACCBSCScheduler):
     """C++ CCBS scheduler with line-inversion window decomposition.
 
     The supported fast path is a labeled permutation made of reciprocal swaps
@@ -123,7 +122,7 @@ class RIPACCBSDWindowedScheduler(RIPACCBSCScheduler):
         if plan is None:
             if not self.fallback_to_backend:
                 raise RuntimeError(
-                    "RIPACCBSDWindowedScheduler only decomposes labeled "
+                    "RIPACCBSWindowedScheduler only decomposes labeled "
                     "single-axis reciprocal swap permutations"
                 )
             super()._plan()
@@ -594,10 +593,7 @@ class RIPACCBSDWindowedScheduler(RIPACCBSCScheduler):
         return int(site[1 - axis])
 
 
-RIPACCBSDScheduler = RIPACCBSDWindowedScheduler
-
 __all__ = [
     "CCBSWindowStats",
-    "RIPACCBSDWindowedScheduler",
-    "RIPACCBSDScheduler",
+    "RIPACCBSWindowedScheduler",
 ]

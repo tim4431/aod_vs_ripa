@@ -35,8 +35,11 @@ from example.inversion_6x6_benchmark import x_gradient_colors, x_inverted_target
 from src.atom_config import Grid
 from src.moving_sequence import MovingSequence
 from src.routing import RoutingRequest, Site, centered_storage_square
-from src.scheduler.ccbs_d import CCBSWindowStats, RIPACCBSDScheduler
-from src.scheduler.ripa_ccbs_c import RIPACCBSCScheduler
+from src.scheduler.ccbs_c import (
+    CCBSWindowStats,
+    RIPACCBSCScheduler,
+    RIPACCBSWindowedScheduler,
+)
 from src.visualization import render_animation
 
 N = 24
@@ -196,7 +199,7 @@ def build_windowed_x_inversion(
     dst: list[Site],
 ) -> tuple[MovingSequence, list[CCBSWindowStats]]:
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=True)
-    scheduler = RIPACCBSDScheduler(
+    scheduler = RIPACCBSWindowedScheduler(
         request,
         collision_dt=COLLISION_DT,
         ccbs_precision=1e-7,

@@ -4,7 +4,7 @@ This program is adapted from [Continuous-CBS](https://github.com/PathPlanning/Co
 
 ## Usage
 `ccbs_solver.cpp` is a standalone C++17 implementation of the raw CCBS/SIPP
-search used by `src.scheduler.ripa_ccbs_c.RIPACCBSCScheduler`.
+search used by `src.scheduler.ccbs_c.RIPACCBSCScheduler`.
 
 The Python wrapper builds the executable on demand with:
 

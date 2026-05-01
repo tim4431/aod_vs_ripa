@@ -45,8 +45,9 @@ This is a decomposition issue, not a fundamental CCBS limitation.
 6. Cache or translate symmetric window solutions where possible, but keep final
    RIPA trajectory validation as the source of truth.
 
-The first implementation of this idea lives in `src/scheduler/ccbs_d`: a
-windowed/decomposed C++ CCBS scheduler that targets dense line inversions while
-falling back to the existing backend for unsupported requests. It now translates
-solved symmetric windows across identical rows/columns, so the 6x6 inversion
-needs one grouped solve plus one pairwise middle solve instead of six of each.
+The first implementation of this idea lives in
+`src/scheduler/ccbs_c/ripa_ccbs_c_windowed.py`: a windowed/decomposed C++ CCBS
+scheduler that targets dense line inversions while falling back to the existing
+backend for unsupported requests. It now translates solved symmetric windows
+across identical rows/columns, so the 6x6 inversion needs one grouped solve plus
+one pairwise middle solve instead of six of each.
