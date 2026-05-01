@@ -1,66 +1,46 @@
 """Manhattan-corridor planner — internal helper for the RIPA pebble
 schedulers.
 
-This module is *not* a `Scheduler` in the sense of `base.Scheduler`; it
-is the shared planning engine that `ripa_pebroute` (Hungarian + greedy)
-and `ripa_stochastic_search` (simulated annealing) both invoke. Public
-schedulers wrap the entry point `plan_labelled` in proper `Scheduler`
-classes — see those modules for the user-facing API.
+This is *not* itself a `base.Scheduler`; it is the shared planning engine
+that `ripa_pebroute` (Hungarian + greedy) and `ripa_stochastic_search`
+(simulated annealing) both call. Each public scheduler wraps the entry
+point `plan_labelled` in a real `Scheduler` class — see those modules
+for the user-facing API.
 
-It is the project-side rewrite of
-`lib/ripa2/visualization/src/schedulers/manhattan.py`. The algorithm is
-unchanged in shape — greedy per-atom routing through 1/2/3/5-segment
-plans selected by earliest predicted finish time, with a swap-pair joint
-planner for swap pairs — but every data type now lives in `src/`:
+The algorithm is a port of `lib/ripa2/visualization/src/schedulers/manhattan.py`:
+greedy per-atom routing through 1/2/3/5-segment corridor plans selected
+by earliest predicted finish time, plus a joint planner for swap pairs.
+Everything runs in *grid units* (integer `(i, j)` sites, distances in
+lattice steps) so the planner is unit-agnostic; acceleration is converted
+once via `grid_accel_from_phys` and segment durations come from
+`bang_bang_duration`.
 
-  * `Grid` is `src.atom_config.Grid` (square N x N with site spacing `d`
-    in micrometers, collision radius `rc`).
-  * Atom trajectories are `src.atom_trajectory.AtomTrajectory`s held by
-    an `AtomEnsemble`. Per-atom segments are committed via
-    `src.movement.RIPAStep` so cross-atom collision validation runs on
-    every commit.
-  * The output is a `src.moving_sequence.MovingSequence`. Internal
-    book-keeping (`Schedule`, `ScheduleEntry`, `CorridorReservations`)
-    is exposed so the search wrapper and inspectors can audit which
-    plan was chosen for each atom.
+Obstacle model: a site is an obstacle iff some atom currently rests
+there or will rest there at some point in the schedule — i.e. iff it's
+in the union of every `RoutingMove`'s `src`/`dst` plus any `static_sites`.
+There is *no* hardcoded storage-vs-corridor parity: the algorithm works
+for any layout the atoms happen to occupy.
 
-The Manhattan planner uses *grid units* (lattice steps) consistently:
-positions in `(i, j)` integer coords, distances as `|Δi| + |Δj|` (or
-single-axis `|Δp|`). Acceleration is converted from
-`PHYS_A_MAX_RIPA` (m/s^2) to grid_units/s^2 via `grid_accel_from_phys`,
-and segment times come from `src.segments.bang_bang_duration`.
+Output: a `src.moving_sequence.MovingSequence` with per-atom trajectories
+committed. The corridor reservation table that drives plan scoring is
+internal (a `_PlanState` discarded after planning).
 
-Obstacle model: a site is treated as occupied (and therefore an
-obstacle to corridor paths) iff some atom currently rests there or
-will rest there at some point in the schedule — i.e. iff the site
-appears in the union of every `RoutingMove`'s ``src``/``dst`` plus any
-`static_sites` passed in. The previous implementation hardcoded
-"storage = even/even" which is the lib's convention but isn't
-intrinsic to the algorithm; the only thing that actually matters is
-whether atoms can be there.
-
-Validation: segments are appended directly to each atom's
-`AtomTrajectory.segments` (and the corresponding `RIPAStep` recorded on
-`MovingSequence.steps`), *bypassing* the `AtomEnsemble.append_segment`
-validator. This is deliberate. The validator's per-commit `post_hold`
-check assumes an atom rests at its segment's `end_pos` from the
-segment's `end_time` until the *current* ensemble horizon — but during
-incremental planning that's wrong: the atom typically has more
-segments coming, so the post_hold position is fictional. The lib's
-reference algorithm also doesn't avoid cross-corridor *transient*
-overlaps (atom A momentarily resting between two segments at a site
-atom B's row-corridor passes through), and would therefore fail the
-validator on those cases too. We sidestep both pitfalls by trusting
-the planner's own corridor-reservation bookkeeping during commit and
-exposing `MovingSequence.validate(dt)` for callers who want a
-post-hoc kinematic check.
+Validation note: segments are appended directly to
+`AtomTrajectory.segments` rather than through `MovingSequence.append`,
+because the framework's per-commit `post_hold` check trips on the lib
+algorithm's cross-corridor transient overlaps (atom A momentarily resting
+between two segments at a site atom B's row-corridor passes through). The
+lib's reference accepts those cases at planning time and lets a separate
+kinematic validator decide their fate; we mirror that. Callers who need
+a strict kinematic check call `sequence.validate(dt=...)` themselves.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
 
 from ..atom_config import AtomConfig, Grid
 from ..atom_trajectory import CollisionError  # noqa: F401  (re-exported for callers)
@@ -75,32 +55,21 @@ from ..segments import bang_bang_duration, make_const_acc_segment
 
 @dataclass
 class RoutingMove:
-    """One labelled atom move (analogue of the lib's ``RoutingRequest``).
-
-    Fields are kept identical so call sites that previously built per-atom
-    lib requests need only swap the import.
-    """
+    """One labelled atom move: send `atom_id`, currently at `src`, to `dst`."""
 
     atom_id: int
     src: Site
     dst: Site
     deadline: Optional[float] = None
-    order: str = "auto"  # 'row_first' | 'col_first' | 'auto' (currently advisory)
 
 
-@dataclass
-class ManhattanParams:
-    """Algorithm-level knobs the Manhattan-corridor planner needs.
-
-    `t_handoff` is the dwell inserted between consecutive segments of one
-    atom (and the temporal buffer between segments of *different* atoms on
-    the same corridor). `r_safe` is the spatial buffer between two segments
-    sharing a corridor; if ``None`` it defaults to ``grid.rc / grid.d`` —
-    the same kinematic-radius the validator enforces.
-    """
-
-    t_handoff: float = 0.5e-6
-    r_safe: Optional[float] = None  # in grid units; None -> derive from grid.rc
+# Algorithm-level defaults. `T_HANDOFF` is the dwell inserted between
+# consecutive segments of one atom and the temporal buffer between segments
+# of *different* atoms on the same corridor; `R_SAFE_DEFAULT=None` means
+# "derive from grid.rc / grid.d" (the same kinematic radius the
+# AtomEnsemble validator enforces).
+T_HANDOFF_DEFAULT: float = 0.5e-6
+R_SAFE_DEFAULT: Optional[float] = None
 
 
 @dataclass
@@ -178,52 +147,18 @@ class CorridorReservations:
 
 
 @dataclass
-class Schedule:
-    """Result of a Manhattan-corridor planning run.
+class _PlanState:
+    """Mutable planner-internal state passed between helpers.
 
-    The canonical output is `sequence` (a `MovingSequence` whose ensemble
-    holds every atom's full trajectory). `entries` and `reservations` are
-    the planner's internal book-keeping, exposed so search wrappers and
-    inspectors can audit per-segment timing and corridor usage.
+    `sequence` is the live `MovingSequence` (the eventual result). `entries`
+    and `reservations` are bookkeeping only — they let the planner score
+    corridor candidates and synchronise swap pairs. Neither is part of the
+    public output; callers receive just the `MovingSequence`.
     """
 
     sequence: MovingSequence
-    entries: List[ScheduleEntry] = field(default_factory=list)
     reservations: CorridorReservations = field(default_factory=CorridorReservations)
-
-    @property
-    def t_end(self) -> float:
-        return self.sequence.total_duration()
-
-    @property
-    def trajectories(self) -> dict:
-        """atom_id -> AtomTrajectory (mirrors the lib's `Schedule.trajectories`
-        slot but the value type is now `src.atom_trajectory.AtomTrajectory`)."""
-        return {a.atom_id: a for a in self.sequence.ensemble.atomtrajs}
-
-    def print_summary(self) -> None:
-        print(f"Schedule: {len(self.entries)} entries, t_end = {self.t_end*1e6:.2f} us")
-        for aid in sorted({e.atom_id for e in self.entries}):
-            segs = sorted([e for e in self.entries if e.atom_id == aid],
-                          key=lambda e: e.t0)
-            print(f"  atom {aid}:")
-            for e in segs:
-                print(f"    [{e.t0*1e6:7.2f}-{e.t1*1e6:7.2f} us]  "
-                      f"axis={e.axis}  {e.p_start:+5.1f} -> {e.p_end:+5.1f} "
-                      f"(orth={e.q_fixed:+.1f})")
-
-
-# ---------------- timing primitives ----------------
-
-
-def _grid_accel(grid: Grid) -> float:
-    return grid_accel_from_phys(PHYS_A_MAX_RIPA, grid.d)
-
-
-def _segment_min_duration(distance_grid: float, accel_grid: float) -> float:
-    """Symmetric bang-bang time for a single-axis move of `distance_grid`
-    sites under `accel_grid` grid_units/s^2."""
-    return bang_bang_duration(distance_grid, accel_grid)
+    entries: List[ScheduleEntry] = field(default_factory=list)
 
 
 # ---------------- corridor selection (cost helpers) ----------------
@@ -265,77 +200,58 @@ def _adjacent_odd(idx: int, target: int, n: int) -> int:
 # ---------------- plan-finish-time scoring ----------------
 
 
-def _plan_finish_time(plan_segs, corridor_idxs, reservations, accel,
-                      t_handoff: float, r_safe: float,
-                      t_start_floor: float = 0.0,
-                      t_start_max: Optional[float] = None) -> float:
-    """Eventual t_end if `plan_segs` is committed at the earliest feasible
-    time >= `t_start_floor`; +inf if no feasible start <= `t_start_max`.
+def _solve_plan_timing(plan_segs, corridor_idxs, reservations, accel,
+                       t_handoff: float, r_safe: float,
+                       t_floor: float = 0.0,
+                       t_start_max: Optional[float] = None
+                       ) -> Tuple[float, float]:
+    """Find the earliest feasible (t_start, t_end) for committing `plan_segs`.
 
-    Mirrors the lib version: outer loop pushes the cursor forward until
-    every segment fits without conflict.
+    Walks the plan from a candidate `t_start = t_floor`. If any segment hits
+    a corridor reservation conflict, the cursor jumps to the conflict's
+    `earliest_free` and the walk restarts. When every segment fits, returns
+    `(t_start, t_end)`. If `t_start_max` is given and would be exceeded, both
+    values come back as `+inf` so callers can disqualify the plan.
+
+    Used by the planner two ways: (a) score plans by predicted t_end during
+    `_build_path` enumeration, (b) re-derive the actual t_start at commit
+    time after the chosen plan is known.
     """
     if not plan_segs:
-        return t_start_floor
+        return t_floor, t_floor
 
     if reservations is None:
-        t = t_start_floor
-        for k, (axis, p_s, p_e, q) in enumerate(plan_segs):
-            t += _segment_min_duration(abs(p_e - p_s), accel)
+        # Fast path: no other atoms to worry about — just sum segment durations.
+        t = t_floor
+        for k, (_axis, p_s, p_e, _q) in enumerate(plan_segs):
+            t += bang_bang_duration(abs(p_e - p_s), accel)
             if k < len(plan_segs) - 1:
                 t += t_handoff
-        if t_start_max is not None and t_start_floor > t_start_max:
-            return float("inf")
-        return t
+        return t_floor, t
 
-    t_cursor = t_start_floor
+    t_cursor = t_floor
     for _outer in range(200):
         t = t_cursor
-        conflict = None
-        for k, (axis, p_s, p_e, q) in enumerate(plan_segs):
-            dur = _segment_min_duration(abs(p_e - p_s), accel)
-            if axis in ("x", "y") and dur > 0:
-                if reservations.conflicts(axis, corridor_idxs[k], t, t + dur,
-                                          p_s, p_e, t_handoff, r_safe):
-                    conflict = reservations.earliest_free(
-                        axis, corridor_idxs[k], t, t + dur,
-                        p_s, p_e, t_handoff, r_safe)
-                    break
+        conflict_t = None
+        for k, (axis, p_s, p_e, _q) in enumerate(plan_segs):
+            dur = bang_bang_duration(abs(p_e - p_s), accel)
+            if axis in ("x", "y") and dur > 0 and reservations.conflicts(
+                axis, corridor_idxs[k], t, t + dur, p_s, p_e, t_handoff, r_safe,
+            ):
+                conflict_t = reservations.earliest_free(
+                    axis, corridor_idxs[k], t, t + dur, p_s, p_e,
+                    t_handoff, r_safe,
+                )
+                break
             t += dur
             if k < len(plan_segs) - 1:
                 t += t_handoff
-        if conflict is None:
+        if conflict_t is None:
             if t_start_max is not None and t_cursor > t_start_max:
-                return float("inf")
-            return t
-        t_cursor = conflict
-    return float("inf")
-
-
-def _solve_t_start(plan_segs, corridor_idxs, reservations, accel,
-                   t_handoff: float, r_safe: float, t_floor: float = 0.0) -> float:
-    """Earliest start time for the whole plan; companion to `_plan_finish_time`
-    that returns the START rather than the finish."""
-    t_cursor = t_floor
-    for _ in range(200):
-        t = t_cursor
-        conflict = None
-        for k, (axis, p_s, p_e, q) in enumerate(plan_segs):
-            dur = _segment_min_duration(abs(p_e - p_s), accel)
-            if axis in ("x", "y") and dur > 0:
-                if reservations.conflicts(axis, corridor_idxs[k], t, t + dur,
-                                          p_s, p_e, t_handoff, r_safe):
-                    conflict = reservations.earliest_free(
-                        axis, corridor_idxs[k], t, t + dur, p_s, p_e,
-                        t_handoff, r_safe)
-                    break
-            t += dur
-            if k < len(plan_segs) - 1:
-                t += t_handoff
-        if conflict is None:
-            return t_cursor
-        t_cursor = conflict
-    return t_cursor
+                return float("inf"), float("inf")
+            return t_cursor, t
+        t_cursor = conflict_t
+    return float("inf"), float("inf")
 
 
 # ---------------- candidate-plan enumeration ----------------
@@ -359,11 +275,12 @@ def _build_path(grid: Grid, blocked: set,
     candidates = []  # list of (cost, plan_tuple)
 
     def add(plan_segs, corridor_idxs, kind):
-        cost = _plan_finish_time(plan_segs, corridor_idxs, reservations, accel,
-                                 t_handoff, r_safe,
-                                 t_start_floor=t_start_floor,
-                                 t_start_max=t_start_max)
-        candidates.append((cost, (plan_segs, corridor_idxs, kind)))
+        _, t_end = _solve_plan_timing(
+            plan_segs, corridor_idxs, reservations, accel,
+            t_handoff, r_safe,
+            t_floor=t_start_floor, t_start_max=t_start_max,
+        )
+        candidates.append((t_end, (plan_segs, corridor_idxs, kind)))
 
     # 1-seg collinear
     if j0 == j1 and _row_clear(j0, i0, i1, blocked):
@@ -440,7 +357,7 @@ def _build_pending_segments(req: RoutingMove, segs_plan, corridor_idxs,
     pending = []
     t_try = t_start
     for k, (axis, p_s, p_e, q) in enumerate(segs_plan):
-        dur = _segment_min_duration(abs(p_e - p_s), accel)
+        dur = bang_bang_duration(abs(p_e - p_s), accel)
         t_s, t_e = t_try, t_try + dur
 
         if axis == "x":
@@ -468,7 +385,7 @@ def _build_pending_segments(req: RoutingMove, segs_plan, corridor_idxs,
     return pending
 
 
-def _commit_pending(pending, sched: Schedule, accel: float) -> None:
+def _commit_pending(pending, state: _PlanState, accel: float) -> None:
     """Apply a batch of pending segments to the schedule.
 
     Segments are appended directly to each atom's `AtomTrajectory.segments`
@@ -489,7 +406,7 @@ def _commit_pending(pending, sched: Schedule, accel: float) -> None:
     pending = sorted(pending, key=lambda item: (item[0], item[2].atom_id,
                                                 item[2].seg_idx))
     for _t_start, step, entry, corridor_idx in pending:
-        atomtraj = sched.sequence.ensemble.atomtraj_by_id(step.atom_id)
+        atomtraj = state.sequence.ensemble.atomtraj_by_id(step.atom_id)
         current = atomtraj.final_pos
         target = tuple(step.target)
         if current != target:
@@ -499,18 +416,18 @@ def _commit_pending(pending, sched: Schedule, accel: float) -> None:
             )
             atomtraj._check_continuity(seg)
             atomtraj.segments.append(seg)
-        sched.sequence.steps.append(step)
-        sched.entries.append(entry)
+        state.sequence.steps.append(step)
+        state.entries.append(entry)
         if corridor_idx is not None:
-            sched.reservations.add(entry, corridor_idx)
+            state.reservations.add(entry, corridor_idx)
 
 
 def _commit_segs(req: RoutingMove, segs_plan, corridor_idxs, t_start: float,
-                 sched: Schedule, accel: float, t_handoff: float) -> None:
+                 state: _PlanState, accel: float, t_handoff: float) -> None:
     """Materialise a single-atom plan onto the schedule + MovingSequence."""
     pending = _build_pending_segments(req, segs_plan, corridor_idxs,
                                       t_start, accel, t_handoff)
-    _commit_pending(pending, sched, accel)
+    _commit_pending(pending, state, accel)
 
 
 # ---------------- swap-pair joint planner ----------------
@@ -542,7 +459,7 @@ def _snapshot_with_added(reservations: CorridorReservations,
     )
     t_try = t_start
     for k, (axis, p_s, p_e, q) in enumerate(plan_segs):
-        dur = _segment_min_duration(abs(p_e - p_s), accel)
+        dur = bang_bang_duration(abs(p_e - p_s), accel)
         t_s, t_e = t_try, t_try + dur
         if axis in ("x", "y") and dur > 0:
             entry = ScheduleEntry(atom_id=atom_id, seg_idx=k, axis=axis,
@@ -557,7 +474,7 @@ def _snapshot_with_added(reservations: CorridorReservations,
 
 def _plan_swap_pair_jointly(a: RoutingMove, b: RoutingMove,
                             grid: Grid, accel: float, t_handoff: float,
-                            r_safe: float, sched: Schedule, all_sites: set,
+                            r_safe: float, state: _PlanState, all_sites: set,
                             verbose: bool) -> bool:
     """Plan a pure swap pair on different corridors, synchronizing both
     atoms' starts so the swap-pair temporal-occupancy constraint is met.
@@ -580,29 +497,38 @@ def _plan_swap_pair_jointly(a: RoutingMove, b: RoutingMove,
                 continue
             segs_a, corr_a = _three_seg_plan_for(a, j_a)
             segs_b, corr_b = _three_seg_plan_for(b, j_b)
+            # Iterate to a synchronised start: each atom's earliest feasible
+            # start depends on the partner's planned reservations, so we
+            # converge on max(t_a, t_b) until it stabilises.
             t_sync = 0.0
             for _ in range(20):
-                t_a_new = _solve_t_start(segs_a, corr_a, sched.reservations,
-                                         accel, t_handoff, r_safe, t_floor=t_sync)
-                sim_res = _snapshot_with_added(sched.reservations, segs_a, corr_a,
+                t_a_new, _ = _solve_plan_timing(
+                    segs_a, corr_a, state.reservations, accel,
+                    t_handoff, r_safe, t_floor=t_sync,
+                )
+                sim_res = _snapshot_with_added(state.reservations, segs_a, corr_a,
                                                t_a_new, accel, t_handoff,
                                                a.atom_id)
-                t_b_new = _solve_t_start(segs_b, corr_b, sim_res,
-                                         accel, t_handoff, r_safe, t_floor=t_sync)
+                t_b_new, _ = _solve_plan_timing(
+                    segs_b, corr_b, sim_res, accel,
+                    t_handoff, r_safe, t_floor=t_sync,
+                )
                 new_sync = max(t_a_new, t_b_new)
                 if abs(new_sync - t_sync) < 1e-12:
                     t_sync = new_sync
                     break
                 t_sync = new_sync
-            t_a_end = _plan_finish_time(segs_a, corr_a, sched.reservations,
-                                        accel, t_handoff, r_safe,
-                                        t_start_floor=t_sync)
-            sim_res = _snapshot_with_added(sched.reservations, segs_a, corr_a,
+            _, t_a_end = _solve_plan_timing(
+                segs_a, corr_a, state.reservations, accel,
+                t_handoff, r_safe, t_floor=t_sync,
+            )
+            sim_res = _snapshot_with_added(state.reservations, segs_a, corr_a,
                                            t_sync, accel, t_handoff,
                                            a.atom_id)
-            t_b_end = _plan_finish_time(segs_b, corr_b, sim_res,
-                                        accel, t_handoff, r_safe,
-                                        t_start_floor=t_sync)
+            _, t_b_end = _solve_plan_timing(
+                segs_b, corr_b, sim_res, accel,
+                t_handoff, r_safe, t_floor=t_sync,
+            )
             cost = max(t_a_end, t_b_end)
             if best is None or cost < best[0]:
                 best = (cost, j_a, j_b, t_sync, t_a_end, t_b_end)
@@ -615,7 +541,7 @@ def _plan_swap_pair_jointly(a: RoutingMove, b: RoutingMove,
     segs_b, corr_b = _three_seg_plan_for(b, j_b)
     pending = _build_pending_segments(a, segs_a, corr_a, t_sync, accel, t_handoff)
     pending += _build_pending_segments(b, segs_b, corr_b, t_sync, accel, t_handoff)
-    _commit_pending(pending, sched, accel)
+    _commit_pending(pending, state, accel)
     if verbose:
         print(f"  swap pair atoms {a.atom_id}<->{b.atom_id}: "
               f"j_a={j_a}, j_b={j_b}, t_sync={t_sync*1e6:.1f} us, "
@@ -638,12 +564,13 @@ def _build_initial_sequence(moves: Sequence[RoutingMove], grid: Grid,
     if len(move_ids) != len(moves):
         raise ValueError("RoutingMove atom_ids must be unique")
 
-    positions: List[Tuple[int, int]] = []
-    atom_ids: List[int] = []
-    for m in moves:
-        positions.append((int(m.src[0]), int(m.src[1])))
-        atom_ids.append(int(m.atom_id))
+    positions: List[Tuple[int, int]] = [
+        (int(m.src[0]), int(m.src[1])) for m in moves
+    ]
+    atom_ids: List[int] = [int(m.atom_id) for m in moves]
 
+    # Static atoms get unique negative IDs so they can't collide with the
+    # move IDs (which are typically 0..M-1).
     next_static_id = -1
     for s in static_sites or []:
         positions.append((int(s[0]), int(s[1])))
@@ -652,48 +579,47 @@ def _build_initial_sequence(moves: Sequence[RoutingMove], grid: Grid,
         atom_ids.append(next_static_id)
         next_static_id -= 1
 
-    import numpy as np  # local — avoid an unconditional dependency at import time
     cfg = AtomConfig(
-        positions=np.asarray(positions, dtype=int) if positions else np.zeros((0, 2), dtype=int),
-        atom_ids=np.asarray(atom_ids, dtype=int) if atom_ids else np.zeros((0,), dtype=int),
+        positions=np.asarray(positions, dtype=int).reshape(-1, 2),
+        atom_ids=np.asarray(atom_ids, dtype=int),
     )
     return MovingSequence(grid=grid, initial=cfg, collision_dt=collision_dt)
 
 
 def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
                   *,
-                  params: Optional[ManhattanParams] = None,
-                  t0_global: float = 0.0,
+                  t_handoff: float = T_HANDOFF_DEFAULT,
+                  r_safe: Optional[float] = R_SAFE_DEFAULT,
                   static_sites: Optional[Sequence[Site]] = None,
                   presort: bool = True,
                   enable_swap_pairs: bool = True,
                   collision_dt: float = 1e-6,
                   sequence: Optional[MovingSequence] = None,
-                  verbose: bool = False) -> Schedule:
+                  verbose: bool = False) -> MovingSequence:
     """Greedy Manhattan-corridor planner.
 
-    Mirrors the lib's ``plan(...)`` algorithm step-for-step, but emits the
-    schedule via ``src.movement.RIPAStep`` onto a ``MovingSequence`` whose
-    initial config matches the moves' source positions. The returned
-    ``Schedule`` wraps that sequence and exposes the entries +
-    reservations the planner used.
+    Returns the populated `MovingSequence` (atoms moved to their targets;
+    `seq.total_duration()` is the schedule's t_end). The corridor reservation
+    table the planner builds while routing is purely internal — callers
+    only see the resulting trajectories.
 
-    `sequence`: optional pre-built `MovingSequence` to plan into. When the
-    `Scheduler` class wrappers in `ripa_pebroute` / `ripa_stochastic_search`
-    invoke the planner, they pass `self.sequence` (already constructed by
-    `base.Scheduler.__post_init__` from the request's initial config) so
-    the resulting schedule is the scheduler's own `self.sequence`. When
-    `None`, the planner builds one from `moves` + `static_sites`.
+    `t_handoff`: dwell between consecutive segments of one atom and the
+    temporal buffer between segments of *different* atoms on the same
+    corridor. `r_safe`: spatial buffer in grid units; `None` derives it
+    from `grid.rc / grid.d`.
+
+    `sequence`: optional pre-built `MovingSequence` to plan into. The
+    Scheduler class wrappers pass `self.sequence` so the plan lands on
+    their own state; when `None` the planner builds a fresh one from
+    `moves` + `static_sites`.
     """
-    params = params or ManhattanParams()
-    accel = _grid_accel(grid)
-    t_handoff = float(params.t_handoff)
-    r_safe = (params.r_safe if params.r_safe is not None
-              else grid.rc / grid.d)
+    accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, grid.d)
+    if r_safe is None:
+        r_safe = grid.rc / grid.d
 
     if sequence is None:
         sequence = _build_initial_sequence(moves, grid, static_sites, collision_dt)
-    sched = Schedule(sequence=sequence)
+    state = _PlanState(sequence=sequence)
 
     moving_sites = ({tuple(m.src) for m in moves} |
                     {tuple(m.dst) for m in moves})
@@ -746,7 +672,7 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
                                         + abs(p[0].dst[1] - p[0].src[1])))
         for (a, b) in swap_pairs:
             _plan_swap_pair_jointly(a, b, grid, accel, t_handoff, r_safe,
-                                    sched, all_sites, verbose)
+                                    state, all_sites, verbose)
 
     # ---- per-atom planning for everyone else ----
     remaining = [m for m in moves if m.atom_id not in paired]
@@ -760,11 +686,11 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
         blocked = all_sites - {tuple(req.src), tuple(req.dst)}
 
         rough_dur = (abs(i1 - i0) + abs(j1 - j0))
-        rough_t_lower = _segment_min_duration(rough_dur, accel)
+        rough_t_lower = bang_bang_duration(rough_dur, accel)
 
-        t_cursor = t0_global
+        t_cursor = 0.0
         occ_id = occupant_of.get(req.atom_id)
-        traj_of = {a.atom_id: a for a in sched.sequence.ensemble.atomtrajs}
+        traj_of = {a.atom_id: a for a in state.sequence.ensemble.atomtrajs}
         if occ_id is not None and occ_id in traj_of and traj_of[occ_id].segments:
             occ_t_start = traj_of[occ_id].segments[0].start_time
             t_cursor = max(t_cursor,
@@ -778,7 +704,7 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
 
         segs_plan, corridor_idxs, plan_kind = _build_path(
             grid, blocked, i0, j0, i1, j1,
-            sched.reservations, accel, t_handoff, r_safe,
+            state.reservations, accel, t_handoff, r_safe,
             t_start_floor=t_cursor, t_start_max=t_start_max,
         )
 
@@ -794,51 +720,20 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
         if occ_id is not None and occ_id in traj_of and traj_of[occ_id].segments:
             actual_total = 0.0
             for k, (axis, p_s, p_e, q) in enumerate(segs_plan):
-                actual_total += _segment_min_duration(abs(p_e - p_s), accel)
+                actual_total += bang_bang_duration(abs(p_e - p_s), accel)
                 if k < len(segs_plan) - 1:
                     actual_total += t_handoff
             occ_t_start = traj_of[occ_id].segments[0].start_time
             t_cursor = max(t_cursor,
                            occ_t_start + t_handoff - actual_total)
 
-        # Walk the conflict-resolution loop to get t_start.
-        t_try = t_cursor
-        for _ in range(200):
-            t = t_try
-            conflict_t = None
-            for k, (axis, p_s, p_e, q) in enumerate(segs_plan):
-                dur = _segment_min_duration(abs(p_e - p_s), accel)
-                if axis in ("x", "y") and dur > 0:
-                    if sched.reservations.conflicts(
-                        axis, corridor_idxs[k], t, t + dur, p_s, p_e,
-                        t_handoff, r_safe,
-                    ):
-                        conflict_t = sched.reservations.earliest_free(
-                            axis, corridor_idxs[k], t, t + dur, p_s, p_e,
-                            t_handoff, r_safe,
-                        )
-                        break
-                t += dur
-                if k < len(segs_plan) - 1:
-                    t += t_handoff
-            if conflict_t is None:
-                break
-            t_try = conflict_t
-
-        _commit_segs(req, segs_plan, corridor_idxs, t_try, sched,
+        # Re-solve t_start with the chosen plan against the reservation table,
+        # then commit at that t_start.
+        t_start, _ = _solve_plan_timing(
+            segs_plan, corridor_idxs, state.reservations, accel,
+            t_handoff, r_safe, t_floor=t_cursor,
+        )
+        _commit_segs(req, segs_plan, corridor_idxs, t_start, state,
                      accel, t_handoff)
 
-    return sched
-
-
-# Convenience alias so call sites can use the lib-style name.
-plan = plan_labelled
-
-
-# Validation note: there is no separate `validate_in_flight` /
-# `validate_occupancy` here anymore — those duplicated what
-# `AtomEnsemble.append_segment` (run on every commit by `_commit_pending`)
-# already enforces. Callers wanting an explicit re-check at a different
-# tolerance can call `schedule.sequence.validate(dt=...)` directly; that
-# replays every step through a fresh ensemble and is the authoritative
-# check.
+    return state.sequence

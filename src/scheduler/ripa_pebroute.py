@@ -20,9 +20,8 @@ Public API:
   plugs into `src.benchmark.benchmark_schedulers` and the existing
   Scheduler framework).
 
-Output is a `Schedule` whose canonical artifact is a
-`src.moving_sequence.MovingSequence`, drop-in compatible with every
-src-side validator and visualiser.
+Output is a `MovingSequence`, drop-in compatible with every src-side
+validator and visualiser.
 """
 
 from __future__ import annotations
@@ -34,11 +33,11 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from ..atom_config import Grid
+from ..moving_sequence import MovingSequence
 from ..routing import Site
 from ._manhattan_planner import (
-    ManhattanParams,
     RoutingMove,
-    Schedule,
+    T_HANDOFF_DEFAULT,
     plan_labelled,
 )
 from .base import Scheduler
@@ -113,19 +112,14 @@ def assign_uncolored(sources: Sequence[Site],
 
 def plan_uncolored(req: UncoloredRequest, grid: Grid,
                    *,
-                   params: Optional[ManhattanParams] = None,
-                   t0_global: float = 0.0,
+                   t_handoff: float = T_HANDOFF_DEFAULT,
                    static_sites: Optional[Sequence[Site]] = None,
                    collision_dt: float = 1e-6,
-                   verbose: bool = False) -> Tuple[Schedule, Assignment]:
+                   verbose: bool = False) -> Tuple[MovingSequence, Assignment]:
     """Stage A: Hungarian-matched uncolored pebble scheduling.
 
-    Returns ``(schedule, assignment)``. The schedule wraps a
-    `MovingSequence`; the assignment is exposed so callers can audit
-    which atom was sent to which target.
-
-    No parity check on `sources`/`targets`: the underlying corridor planner
-    treats *any* atom-occupied site as an obstacle, so storage layouts
+    Returns ``(sequence, assignment)``. The bijection-aware planner
+    treats any currently-occupied site as an obstacle, so storage layouts
     other than the lib's even/even convention work without extra wiring.
     """
     assignment = assign_uncolored(req.sources, req.targets)
@@ -154,75 +148,36 @@ def plan_uncolored(req: UncoloredRequest, grid: Grid,
             print(f"  atom {atom_ids[i]}: {req.sources[i]} -> {req.targets[j]}  "
                   f"(d = {assignment.cost_matrix[i, j]:.0f})")
 
-    schedule = plan_labelled(
+    sequence = plan_labelled(
         moves, grid,
-        params=params,
-        t0_global=t0_global,
+        t_handoff=t_handoff,
         static_sites=static_sites,
         collision_dt=collision_dt,
         verbose=verbose,
     )
-    return schedule, assignment
+    return sequence, assignment
 
 
 def plan_labelled_pebble(moves: Sequence[RoutingMove], grid: Grid,
                          *,
-                         params: Optional[ManhattanParams] = None,
-                         t0_global: float = 0.0,
+                         t_handoff: float = T_HANDOFF_DEFAULT,
                          static_sites: Optional[Sequence[Site]] = None,
                          collision_dt: float = 1e-6,
-                         verbose: bool = False) -> Schedule:
-    """Stage A passthrough for the labelled case.
-
-    Provided so downstream code can route every scheduling call through
-    `pebble.*` without caring whether the scene is labelled or uncolored.
-    Behaves identically to `ripa_manhattan.plan_labelled`.
+                         verbose: bool = False) -> MovingSequence:
+    """Pebble-flavoured wrapper around `plan_labelled` — provided so callers
+    can route through this module regardless of labelled/uncolored framing.
     """
     return plan_labelled(
         list(moves), grid,
-        params=params,
-        t0_global=t0_global,
+        t_handoff=t_handoff,
         static_sites=static_sites,
         collision_dt=collision_dt,
         verbose=verbose,
     )
 
 
-# ---------------- stage stubs (planned) ----------------
 
 
-def plan_uncolored_greedy(req: UncoloredRequest, grid: Grid,
-                          **kwargs) -> Tuple[Schedule, Assignment]:
-    """Stage B (planned): k-NN greedy matching as a cheaper alternative to
-    Hungarian for very large m. Not implemented yet.
-    """
-    raise NotImplementedError(
-        "Stage B (k-NN greedy uncolored matching) not implemented; "
-        "use plan_uncolored() for now."
-    )
-
-
-def plan_cycle_rotation(req: UncoloredRequest, grid: Grid,
-                        **kwargs) -> Tuple[Schedule, Assignment]:
-    """Stage C (planned): detect cycles in the source->target permutation and
-    rotate them through a buffered corridor cell (Yu & Rus 2012).
-    Not implemented yet.
-    """
-    raise NotImplementedError(
-        "Stage C (cycle-rotation planner) not implemented; "
-        "use plan_uncolored() for now."
-    )
-
-
-def plan_makespan_ilp(req: UncoloredRequest, grid: Grid,
-                      **kwargs) -> Tuple[Schedule, Assignment]:
-    """Stage D (planned): time-optimal ILP / network-flow scheduling
-    (Yu & LaValle 2015). Heavy; intended as a benchmark oracle.
-    Not implemented yet.
-    """
-    raise NotImplementedError(
-        "Stage D (ILP makespan) not implemented; reference oracle only."
-    )
 
 
 # ---------------- Scheduler-class wrapper ----------------
@@ -243,39 +198,33 @@ class RIPAPebRouteScheduler(Scheduler):
     directly — they bypass the base class entirely.
     """
 
-    params: Optional[ManhattanParams] = None
+    t_handoff: float = T_HANDOFF_DEFAULT
     static_sites: Optional[Sequence[Site]] = None
 
     def _plan(self) -> None:
-        params = self.params or ManhattanParams()
-
+        # Build the per-atom move list. For unlabeled requests we pick the
+        # Hungarian-optimal bijection first, then route as if labeled.
         if self.request.labeled:
             moves = [
-                RoutingMove(
-                    atom_id=k,
-                    src=tuple(self.request.src[k]),
-                    dst=tuple(self.request.dst[k]),
-                )
+                RoutingMove(atom_id=k,
+                            src=tuple(self.request.src[k]),
+                            dst=tuple(self.request.dst[k]))
                 for k in range(len(self.request.src))
             ]
         else:
             assignment = assign_uncolored(self.request.src, self.request.dst)
             moves = [
-                RoutingMove(
-                    atom_id=i,
-                    src=tuple(self.request.src[i]),
-                    dst=tuple(self.request.dst[j]),
-                )
+                RoutingMove(atom_id=i,
+                            src=tuple(self.request.src[i]),
+                            dst=tuple(self.request.dst[j]))
                 for (i, j) in assignment.pairs
             ]
 
-        # Plan into the MovingSequence the base class already prepared from
-        # `request.initial`. The planner appends segments to that sequence in
-        # place, so `self.sequence` ends up holding the result without any
-        # post-hoc swap.
+        # Plan in place onto the sequence the base class already built from
+        # `request.initial`; `self.sequence` ends up holding the result.
         plan_labelled(
             moves, self.request.grid,
-            params=params,
+            t_handoff=self.t_handoff,
             static_sites=self.static_sites,
             collision_dt=self.collision_dt,
             sequence=self.sequence,

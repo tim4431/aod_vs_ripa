@@ -20,8 +20,6 @@ Atoms carry distinguishable state (e.g. encoded quantum information), so the mov
 
 
 
-
-
 ## crossed AOD: row x column grid-like patterns, no crossing.
 
 - Each AOD turns one RF tone `f_RF` into a deflection angle `θ ≈ λ·f_RF/v_s` → spot position `y = f·θ ∝ f_RF` along its axis.

@@ -9,10 +9,8 @@ over three knobs the greedy planner picks deterministically:
      assignment is not always corridor-time-optimal; local 2-target
      swaps explore the alternative.
 
-Bad candidates (occupancy violation, corridor overlap, kinematic
-close-approach) are rejected with `+inf` cost so the search treats them
-as unreachable. Final result is the best-scored schedule, returned as a
-`Schedule` whose `sequence` is the canonical src-side artifact.
+Final result is the best-scored schedule, returned as a
+`MovingSequence` (the canonical src-side artifact).
 
 Public API:
 
@@ -30,11 +28,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
 from ..atom_config import Grid
+from ..moving_sequence import MovingSequence
 from ..routing import Site
 from ._manhattan_planner import (
-    ManhattanParams,
     RoutingMove,
-    Schedule,
+    T_HANDOFF_DEFAULT,
     plan_labelled,
 )
 from .base import Scheduler
@@ -50,7 +48,13 @@ from .ripa_pebroute import (
 
 @dataclass
 class SearchResult:
-    schedule: Schedule
+    """Best schedule the SA loop produced, plus a few stats for inspection.
+
+    `sequence` is the canonical artefact (a `MovingSequence`); `assignment`
+    is set only for uncolored searches that picked a Hungarian-style bijection.
+    """
+
+    sequence: MovingSequence
     assignment: Optional[Assignment]
     n_iter: int
     accept_count: int
@@ -64,30 +68,49 @@ class SearchResult:
 # ---------------- helpers ----------------
 
 
-def _evaluate(moves: Sequence[RoutingMove], grid: Grid,
-              *, params: ManhattanParams,
-              enable_swap_pairs: bool,
-              t0_global: float = 0.0,
-              static_sites: Optional[Sequence[Site]] = None,
-              collision_dt: float = 1e-6) -> Tuple[float, Schedule]:
-    """Plan a candidate schedule and return its `(t_end, schedule)`.
+def _is_collision_free(sequence: MovingSequence) -> bool:
+    """Pairwise close-approach check on the full committed sequence.
 
-    The planner commits via the bypass path (see `_manhattan_planner`),
-    so it doesn't raise on cross-corridor transient overlaps; callers
-    that need a strict kinematic guarantee can re-validate the final
-    schedule via `schedule.sequence.validate(dt)`.
+    The Manhattan planner commits via the bypass path (segments appended
+    straight to `AtomTrajectory.segments` so the per-step `post_hold`
+    check doesn't trip on incremental state). To screen out the lib's
+    cross-corridor transient overlaps anyway, we run the framework's own
+    pairwise distance helper segment-by-segment: each segment becomes a
+    candidate against every other atom's full timeline (segments +
+    implicit hold gaps via `AtomTrajectory.timeline_segments`). The
+    `min distance >= grid.rc` test inside
+    `AtomEnsemble._check_candidate_collisions` is the same one the
+    framework uses on `append_segment`.
     """
-    schedule = plan_labelled(
+    ens = sequence.ensemble
+    for atom in ens.atomtrajs:
+        for seg in atom.segments:
+            if not ens._check_candidate_collisions({atom.atom_id: seg}).ok:
+                return False
+    return True
+
+
+def _evaluate(moves: Sequence[RoutingMove], grid: Grid,
+              *, t_handoff: float,
+              enable_swap_pairs: bool,
+              static_sites: Optional[Sequence[Site]] = None,
+              collision_dt: float = 1e-6) -> Tuple[float, MovingSequence]:
+    """Plan a candidate schedule and return its `(t_end, sequence)`.
+
+    Colliding candidates get `t_end = +inf` so the SA loop rejects them.
+    """
+    sequence = plan_labelled(
         list(moves), grid,
-        params=params,
-        t0_global=t0_global,
+        t_handoff=t_handoff,
         static_sites=static_sites,
         presort=False,
         enable_swap_pairs=enable_swap_pairs,
         collision_dt=collision_dt,
         verbose=False,
     )
-    return schedule.t_end, schedule
+    if not _is_collision_free(sequence):
+        return float("inf"), sequence
+    return sequence.total_duration(), sequence
 
 
 def _perturb_order(order: List[int], rng: random.Random) -> List[int]:
@@ -117,7 +140,7 @@ def _perturb_order(order: List[int], rng: random.Random) -> List[int]:
 
 def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
                     *,
-                    params: Optional[ManhattanParams] = None,
+                    t_handoff: float = T_HANDOFF_DEFAULT,
                     n_iter: int = 400,
                     T0: Optional[float] = None,
                     cooling: float = 0.992,
@@ -130,23 +153,21 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
 
     Iterates: perturb processing order (and, with low prob., flip the
     swap-pair toggle); replan via `plan_labelled(..., presort=False)`;
-    accept via simulated annealing on `Schedule.t_end`. Candidates that
-    `plan_labelled` rejects with `CollisionError` get `+inf` cost.
+    accept via simulated annealing on `MovingSequence.total_duration()`.
     """
-    params = params or ManhattanParams()
     rng = random.Random(seed)
     moves = list(moves)
     n = len(moves)
     if n == 0:
-        sched = plan_labelled([], grid, params=params,
-                              collision_dt=collision_dt)
-        return SearchResult(sched, None, 0, 0, 0.0, 0.0, True)
+        seq = plan_labelled([], grid, t_handoff=t_handoff,
+                            collision_dt=collision_dt)
+        return SearchResult(seq, None, 0, 0, 0.0, 0.0, True)
 
     order = list(range(n))
     enable_pairs = True
     cur_moves = [moves[k] for k in order]
-    cur_t, cur_sched = _evaluate(
-        cur_moves, grid, params=params,
+    cur_t, cur_seq = _evaluate(
+        cur_moves, grid, t_handoff=t_handoff,
         enable_swap_pairs=enable_pairs,
         static_sites=static_sites,
         collision_dt=collision_dt,
@@ -154,7 +175,7 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
     initial_t = cur_t
 
     best_t = cur_t
-    best_sched = cur_sched
+    best_seq = cur_seq
     best_order = order[:]
     best_pairs = enable_pairs
 
@@ -171,8 +192,8 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
         if try_disable_pairs and rng.random() < 0.05:
             new_pairs = not enable_pairs
         new_moves = [moves[k] for k in new_order]
-        new_t, new_sched = _evaluate(
-            new_moves, grid, params=params,
+        new_t, new_seq = _evaluate(
+            new_moves, grid, t_handoff=t_handoff,
             enable_swap_pairs=new_pairs,
             static_sites=static_sites,
             collision_dt=collision_dt,
@@ -182,11 +203,11 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
             order = new_order
             enable_pairs = new_pairs
             cur_t = new_t
-            cur_sched = new_sched
+            cur_seq = new_seq
             accept += 1
             if cur_t < best_t:
                 best_t = cur_t
-                best_sched = cur_sched
+                best_seq = cur_seq
                 best_order = order[:]
                 best_pairs = enable_pairs
         T *= cooling
@@ -198,7 +219,7 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
                   f"pairs={enable_pairs}")
 
     return SearchResult(
-        schedule=best_sched, assignment=None,
+        sequence=best_seq, assignment=None,
         n_iter=n_iter, accept_count=accept,
         initial_t_end=initial_t, best_t_end=best_t,
         enable_swap_pairs_final=best_pairs,
@@ -219,7 +240,7 @@ def _build_uncolored_moves(sources, targets, atom_ids, pairs, order):
 
 def search_uncolored(req: UncoloredRequest, grid: Grid,
                      *,
-                     params: Optional[ManhattanParams] = None,
+                     t_handoff: float = T_HANDOFF_DEFAULT,
                      n_iter: int = 400,
                      T0: Optional[float] = None,
                      cooling: float = 0.992,
@@ -241,15 +262,14 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
     - Otherwise perturb the processing order.
     - With probability 0.05, also flip the `enable_swap_pairs` toggle.
     """
-    params = params or ManhattanParams()
     rng = random.Random(seed)
 
     initial_asg = assign_uncolored(req.sources, req.targets)
     n = len(req.sources)
     if n == 0:
-        sched = plan_labelled([], grid, params=params,
-                              collision_dt=collision_dt)
-        return SearchResult(sched, initial_asg, 0, 0, 0.0, 0.0, True)
+        seq = plan_labelled([], grid, t_handoff=t_handoff,
+                            collision_dt=collision_dt)
+        return SearchResult(seq, initial_asg, 0, 0, 0.0, 0.0, True)
 
     if req.atom_ids is None:
         atom_ids = list(range(n))
@@ -264,15 +284,15 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
 
     cur_moves = _build_uncolored_moves(req.sources, req.targets,
                                        atom_ids, pairs, order)
-    cur_t, cur_sched = _evaluate(
-        cur_moves, grid, params=params,
+    cur_t, cur_seq = _evaluate(
+        cur_moves, grid, t_handoff=t_handoff,
         enable_swap_pairs=enable_pairs,
         static_sites=static_sites,
         collision_dt=collision_dt,
     )
     initial_t = cur_t
     best_t = cur_t
-    best_sched = cur_sched
+    best_seq = cur_seq
     best_pairs_state = pairs[:]
     best_order = order[:]
     best_swap_pair_flag = enable_pairs
@@ -302,8 +322,8 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
 
         new_moves = _build_uncolored_moves(
             req.sources, req.targets, atom_ids, new_pairs_state, new_order)
-        new_t, new_sched = _evaluate(
-            new_moves, grid, params=params,
+        new_t, new_seq = _evaluate(
+            new_moves, grid, t_handoff=t_handoff,
             enable_swap_pairs=new_swap_flag,
             static_sites=static_sites,
             collision_dt=collision_dt,
@@ -315,11 +335,11 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
             order = new_order
             enable_pairs = new_swap_flag
             cur_t = new_t
-            cur_sched = new_sched
+            cur_seq = new_seq
             accept += 1
             if cur_t < best_t:
                 best_t = cur_t
-                best_sched = cur_sched
+                best_seq = cur_seq
                 best_pairs_state = pairs[:]
                 best_order = order[:]
                 best_swap_pair_flag = enable_pairs
@@ -340,7 +360,7 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
         cost_matrix=initial_asg.cost_matrix,
     )
     return SearchResult(
-        schedule=best_sched, assignment=final_assignment,
+        sequence=best_seq, assignment=final_assignment,
         n_iter=n_iter, accept_count=accept,
         initial_t_end=initial_t, best_t_end=best_t,
         enable_swap_pairs_final=best_swap_pair_flag,
@@ -348,32 +368,39 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
     )
 
 
-def validate_schedule(schedule: Schedule, moves: Sequence[RoutingMove],
-                      params: Optional[ManhattanParams] = None,
+def validate_schedule(sequence: MovingSequence,
+                      moves: Sequence[RoutingMove] = (),
                       *,
-                      label: str = "",
-                      kinematic_dt: float = 1e-6) -> dict:
-    """Re-run the kinematic validator on a schedule.
+                      label: str = "") -> dict:
+    """Pairwise close-approach check on a committed sequence.
 
-    With validated commits, planning never produces structural occupancy
-    or corridor-overlap failures (those would have raised at commit
-    time), so the only thing left to check post-hoc is the kinematic
-    replay — useful when callers want to confirm the schedule under a
-    different `dt` than the one used during commit. `moves`/`params`
-    are accepted for API parity with the lib but currently unused.
+    Walks every atom's segments and checks each one against the other
+    atoms' full timelines via `AtomEnsemble._check_candidate_collisions`
+    — the same framework helper that drives `append_segment`'s collision
+    test. Returns the worst-pair report so callers can pinpoint where
+    the schedule goes wrong. `moves` is accepted for API parity with the
+    lib's `validate_schedule` signature but not consulted.
     """
-    del moves, params  # accepted for API parity; not consulted
-    report = schedule.sequence.validate(dt=kinematic_dt)
+    del moves
+    ens = sequence.ensemble
+    worst_pair = None
+    worst_dist = float("inf")
+    for atom in ens.atomtrajs:
+        for seg in atom.segments:
+            rep = ens._check_candidate_collisions({atom.atom_id: seg})
+            if not rep.ok and rep.worst_distance < worst_dist:
+                worst_pair = rep.worst_pair
+                worst_dist = rep.worst_distance
+    ok = worst_pair is None
     if label:
-        if report.ok:
+        if ok:
             print(f"  validator [{label}]: clean")
         else:
-            a, b, t = (report.worst_pair if report.worst_pair
-                       else (-1, -1, 0.0))
+            a, b, t = worst_pair
             print(f"  validator [{label}]: COLLISION  "
                   f"atoms {a}/{b} at t={t*1e6:.1f} us "
-                  f"(min distance {report.worst_distance:.3f} um)")
-    return {"kinematic": report}
+                  f"(min distance {worst_dist:.3f} um)")
+    return {"ok": ok, "worst_pair": worst_pair, "worst_distance": worst_dist}
 
 
 # ---------------- Scheduler-class wrapper ----------------
@@ -384,19 +411,19 @@ class RIPASearchScheduler(Scheduler):
     """`base.Scheduler` adapter for the simulated-annealing search.
 
     Wraps `search_labelled` (labeled requests) or `search_uncolored`
-    (unlabeled requests). The search builds many candidate
-    `MovingSequence`s internally; on completion, the best-scoring
-    sequence is hoisted onto `self.sequence` so the base class's
-    final-config check sees the right state.
+    (unlabeled requests). Each candidate is screened by
+    `_is_collision_free` (which calls the same `_check_candidate_collisions`
+    test that gates `AtomEnsemble.append_segment`); colliding candidates
+    are tagged with `+inf` cost and the SA never picks them. On
+    completion the best-scoring sequence is hoisted onto `self.sequence`.
 
-    Schedules are not re-validated kinematically here — the planner
-    commits via the bypass path, so cross-corridor transient overlaps
-    (which the lib's algorithm doesn't avoid) are accepted by the
-    scheduler. Call `self.sequence.validate(dt=...)` after `plan()`
-    if you need a strict kinematic guarantee.
+    If the algorithm can't find any collision-free schedule within
+    `n_iter`, the returned sequence falls back to the best (possibly
+    colliding) candidate seen — call `validate_schedule(self.sequence)`
+    after `plan()` to find out.
     """
 
-    params: Optional[ManhattanParams] = None
+    t_handoff: float = T_HANDOFF_DEFAULT
     n_iter: int = 400
     cooling: float = 0.992
     seed: int = 0
@@ -406,28 +433,21 @@ class RIPASearchScheduler(Scheduler):
     T0: Optional[float] = None
 
     def _plan(self) -> None:
-        params = self.params or ManhattanParams()
-
         if self.request.labeled:
             moves = [
-                RoutingMove(
-                    atom_id=k,
-                    src=tuple(self.request.src[k]),
-                    dst=tuple(self.request.dst[k]),
-                )
+                RoutingMove(atom_id=k,
+                            src=tuple(self.request.src[k]),
+                            dst=tuple(self.request.dst[k]))
                 for k in range(len(self.request.src))
             ]
             res = search_labelled(
                 moves, self.request.grid,
-                params=params,
-                n_iter=self.n_iter,
-                T0=self.T0,
-                cooling=self.cooling,
+                t_handoff=self.t_handoff,
+                n_iter=self.n_iter, T0=self.T0, cooling=self.cooling,
                 try_disable_pairs=self.try_disable_pairs,
                 seed=self.seed,
                 static_sites=self.static_sites,
                 collision_dt=self.collision_dt,
-                verbose=False,
             )
         else:
             req = UncoloredRequest(
@@ -436,18 +456,15 @@ class RIPASearchScheduler(Scheduler):
             )
             res = search_uncolored(
                 req, self.request.grid,
-                params=params,
-                n_iter=self.n_iter,
-                T0=self.T0,
-                cooling=self.cooling,
+                t_handoff=self.t_handoff,
+                n_iter=self.n_iter, T0=self.T0, cooling=self.cooling,
                 bijection_swap_prob=self.bijection_swap_prob,
                 try_disable_pairs=self.try_disable_pairs,
                 seed=self.seed,
                 static_sites=self.static_sites,
                 collision_dt=self.collision_dt,
-                verbose=False,
             )
 
-        # Hoist the best schedule's MovingSequence onto self.sequence so the
-        # base class's final-config check sees the right state.
-        self.sequence = res.schedule.sequence
+        # Hoist the best sequence onto self.sequence so the base class's
+        # final-config check sees the right state.
+        self.sequence = res.sequence
