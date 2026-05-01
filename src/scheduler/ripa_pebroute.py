@@ -111,18 +111,6 @@ def assign_uncolored(sources: Sequence[Site],
 # ---------------- scheduler entry points ----------------
 
 
-def _validate_storage_parity(req: UncoloredRequest) -> None:
-    """The Manhattan-corridor planner assumes atoms live on even/even sites
-    (storage parity). Reject mismatches up front so the failure mode is
-    clear rather than mysterious-collision later."""
-    for s in req.sources:
-        if s[0] % 2 != 0 or s[1] % 2 != 0:
-            raise ValueError(f"source {s} is not on a storage (even, even) site")
-    for t in req.targets:
-        if t[0] % 2 != 0 or t[1] % 2 != 0:
-            raise ValueError(f"target {t} is not on a storage (even, even) site")
-
-
 def plan_uncolored(req: UncoloredRequest, grid: Grid,
                    *,
                    params: Optional[ManhattanParams] = None,
@@ -135,9 +123,11 @@ def plan_uncolored(req: UncoloredRequest, grid: Grid,
     Returns ``(schedule, assignment)``. The schedule wraps a
     `MovingSequence`; the assignment is exposed so callers can audit
     which atom was sent to which target.
-    """
-    _validate_storage_parity(req)
 
+    No parity check on `sources`/`targets`: the underlying corridor planner
+    treats *any* atom-occupied site as an obstacle, so storage layouts
+    other than the lib's even/even convention work without extra wiring.
+    """
     assignment = assign_uncolored(req.sources, req.targets)
 
     if req.atom_ids is None:

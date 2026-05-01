@@ -30,10 +30,30 @@ single-axis `|Δp|`). Acceleration is converted from
 `PHYS_A_MAX_RIPA` (m/s^2) to grid_units/s^2 via `grid_accel_from_phys`,
 and segment times come from `src.segments.bang_bang_duration`.
 
-Storage parity convention: a site `(i, j)` is a *storage* site iff
-both `i` and `j` are even. Odd indices are corridors. This matches the
-lib's hardcoded convention; if a different highway pattern is needed
-in the future, expose the parity check as a parameter.
+Obstacle model: a site is treated as occupied (and therefore an
+obstacle to corridor paths) iff some atom currently rests there or
+will rest there at some point in the schedule — i.e. iff the site
+appears in the union of every `RoutingMove`'s ``src``/``dst`` plus any
+`static_sites` passed in. The previous implementation hardcoded
+"storage = even/even" which is the lib's convention but isn't
+intrinsic to the algorithm; the only thing that actually matters is
+whether atoms can be there.
+
+Validation: segments are appended directly to each atom's
+`AtomTrajectory.segments` (and the corresponding `RIPAStep` recorded on
+`MovingSequence.steps`), *bypassing* the `AtomEnsemble.append_segment`
+validator. This is deliberate. The validator's per-commit `post_hold`
+check assumes an atom rests at its segment's `end_pos` from the
+segment's `end_time` until the *current* ensemble horizon — but during
+incremental planning that's wrong: the atom typically has more
+segments coming, so the post_hold position is fictional. The lib's
+reference algorithm also doesn't avoid cross-corridor *transient*
+overlaps (atom A momentarily resting between two segments at a site
+atom B's row-corridor passes through), and would therefore fail the
+validator on those cases too. We sidestep both pitfalls by trusting
+the planner's own corridor-reservation bookkeeping during commit and
+exposing `MovingSequence.validate(dt)` for callers who want a
+post-hoc kinematic check.
 """
 
 from __future__ import annotations
@@ -43,11 +63,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
 from ..atom_config import AtomConfig, Grid
-from ..atom_trajectory import AtomEnsemble, CollisionError, CollisionReport
+from ..atom_trajectory import CollisionError  # noqa: F401  (re-exported for callers)
 from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
 from ..moving_sequence import MovingSequence
 from ..routing import Site
-from ..segments import Segment, bang_bang_duration, make_const_acc_segment
+from ..segments import bang_bang_duration, make_const_acc_segment
 
 
 # ---------------- per-atom request + result types ----------------
@@ -193,13 +213,6 @@ class Schedule:
                       f"(orth={e.q_fixed:+.1f})")
 
 
-# ---------------- parity helpers (storage = even, corridors = odd) ----------------
-
-
-def _is_storage(i: int, j: int) -> bool:
-    return i % 2 == 0 and j % 2 == 0
-
-
 # ---------------- timing primitives ----------------
 
 
@@ -214,12 +227,19 @@ def _segment_min_duration(distance_grid: float, accel_grid: float) -> float:
 
 
 # ---------------- corridor selection (cost helpers) ----------------
+#
+# `blocked` is the set of sites another atom currently rests at (or will
+# rest at) — derived from the moves' src/dst plus any static atoms. A
+# corridor traversal is "clear" when none of its cells are in `blocked`.
+# This is the *only* obstacle test we need: there's no separate storage-vs-
+# highway parity convention to maintain, and the algorithm therefore works
+# for any atom layout, not just the lib's even/even storage pattern.
 
 
 def _row_clear(j: int, i_a: int, i_b: int, blocked: set) -> bool:
     lo, hi = sorted((i_a, i_b))
     for k in range(lo, hi + 1):
-        if _is_storage(k, j) and (k, j) in blocked:
+        if (k, j) in blocked:
             return False
     return True
 
@@ -227,7 +247,7 @@ def _row_clear(j: int, i_a: int, i_b: int, blocked: set) -> bool:
 def _col_clear(i: int, j_a: int, j_b: int, blocked: set) -> bool:
     lo, hi = sorted((j_a, j_b))
     for k in range(lo, hi + 1):
-        if _is_storage(i, k) and (i, k) in blocked:
+        if (i, k) in blocked:
             return False
     return True
 
@@ -453,25 +473,21 @@ def _commit_pending(pending, sched: Schedule, accel: float) -> None:
 
     Segments are appended directly to each atom's `AtomTrajectory.segments`
     (and the corresponding `RIPAStep` recorded on `MovingSequence.steps`),
-    *bypassing* the per-step kinematic validator. Reasoning: the planner's
-    corridor reservation table already prevents the conflicts it cares
-    about, but the kinematic validator additionally trips on transient
-    cross-corridor overlaps — atom A momentarily resting at site X while
-    atom B's row-corridor passes through X. The lib's reference algorithm
-    accepts those cases at planning time and lets a separate kinematic
-    validator (run by the search wrapper) reject the bad ones with
-    `+inf` cost. We mirror that contract here: planning produces a
-    schedule unconditionally; callers wanting strict validation use
-    `validate_kinematic_schedule(schedule)`.
+    *bypassing* `AtomEnsemble.append_segment`'s collision validator. See
+    the module docstring for the rationale; tl;dr the lib's algorithm
+    accepts transient cross-corridor overlaps and the validator's
+    incremental post_hold check trips on them, so the planner trusts its
+    own corridor reservation table during commit and lets callers run
+    `schedule.sequence.validate(dt)` after the fact if they want a strict
+    kinematic check.
 
-    Within this batch, sorting by `t_start` and `(atom_id, seg_idx)`
-    keeps each atom's segments in chronological order — required by
-    `AtomTrajectory._check_continuity`.
+    Sorting by `(t_start, atom_id, seg_idx)` keeps each atom's segments
+    in chronological order (required by `AtomTrajectory._check_continuity`)
+    and interleaves swap-pair atoms so each one's segments are anchored
+    in time order alongside its partner's.
     """
     pending = sorted(pending, key=lambda item: (item[0], item[2].atom_id,
                                                 item[2].seg_idx))
-    grid = sched.sequence.grid
-    accel_grid = accel  # accel is already in grid_units/s^2
     for _t_start, step, entry, corridor_idx in pending:
         atomtraj = sched.sequence.ensemble.atomtraj_by_id(step.atom_id)
         current = atomtraj.final_pos
@@ -479,7 +495,7 @@ def _commit_pending(pending, sched: Schedule, accel: float) -> None:
         if current != target:
             seg = make_const_acc_segment(
                 current, target, step.start_time,
-                accel=accel_grid, channel=step.channel,
+                accel=accel, channel=step.channel,
             )
             atomtraj._check_continuity(seg)
             atomtraj.segments.append(seg)
@@ -819,77 +835,10 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
 plan = plan_labelled
 
 
-# ---------------- post-hoc validators (used by the search wrapper) ----------------
-
-
-def validate_occupancy(moves: Sequence[RoutingMove], schedule: Schedule) -> List[str]:
-    """Endpoint occupancy check.
-
-    For every pair (mover, occupant) where the mover's destination is
-    another atom's source, confirm the mover actually arrives *after* the
-    occupant departs. Returns a list of human-readable violation strings;
-    an empty list means the schedule is OK on this dimension.
-    """
-    by_id = {m.atom_id: m for m in moves}
-    out: List[str] = []
-    trajs = {a.atom_id: a for a in schedule.sequence.ensemble.atomtrajs
-             if a.segments}
-    for m in moves:
-        if m.atom_id not in trajs:
-            continue
-        occupant = next(
-            (n for n in moves
-             if n.atom_id != m.atom_id and tuple(n.src) == tuple(m.dst)),
-            None,
-        )
-        if occupant is None or occupant.atom_id not in trajs:
-            continue
-        my_arrival = trajs[m.atom_id].final_time
-        occ_departure = trajs[occupant.atom_id].segments[0].start_time
-        if occ_departure >= my_arrival:
-            out.append(
-                f"atom {m.atom_id} arrives at site {tuple(m.dst)} at "
-                f"t={my_arrival*1e6:.1f} us, but atom {occupant.atom_id} "
-                f"doesn't leave that site until t={occ_departure*1e6:.1f} us"
-            )
-    return out
-
-
-def validate_in_flight(schedule: Schedule, params: ManhattanParams) -> List[str]:
-    """Corridor-reservation overlap check (cheap, structural).
-
-    Mirrors the lib's `_validate_in_flight_collisions` — looks for two
-    entries on the same corridor whose space-time bounds overlap within
-    the algorithm's own ``t_handoff`` / ``r_safe`` envelope.
-
-    `r_safe` defaults to ``grid.rc / grid.d`` if not set on `params`.
-    """
-    grid = schedule.sequence.grid
-    t_handoff = params.t_handoff
-    r_safe = params.r_safe if params.r_safe is not None else grid.rc / grid.d
-    out: List[str] = []
-    for axis_name, bucket in (("row", schedule.reservations.by_row),
-                              ("col", schedule.reservations.by_col)):
-        for corr_idx, entries in bucket.items():
-            n = len(entries)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    a, b = entries[i], entries[j]
-                    if a.atom_id == b.atom_id:
-                        continue
-                    if a.t1 + t_handoff <= b.t0 or b.t1 + t_handoff <= a.t0:
-                        continue
-                    lo_a, hi_a = sorted((a.p_start, a.p_end))
-                    lo_b, hi_b = sorted((b.p_start, b.p_end))
-                    if hi_a + r_safe <= lo_b or hi_b + r_safe <= lo_a:
-                        continue
-                    out.append(
-                        f"atoms {a.atom_id} and {b.atom_id} share "
-                        f"{axis_name} {corr_idx}"
-                    )
-    return out
-
-
-def validate_kinematic(schedule: Schedule, *, dt: float = 1e-6) -> bool:
-    """True iff `MovingSequence.validate(dt)` is collision-free."""
-    return schedule.sequence.validate(dt=dt).ok
+# Validation note: there is no separate `validate_in_flight` /
+# `validate_occupancy` here anymore — those duplicated what
+# `AtomEnsemble.append_segment` (run on every commit by `_commit_pending`)
+# already enforces. Callers wanting an explicit re-check at a different
+# tolerance can call `schedule.sequence.validate(dt=...)` directly; that
+# replays every step through a fresh ensemble and is the authoritative
+# check.

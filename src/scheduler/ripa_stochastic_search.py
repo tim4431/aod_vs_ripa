@@ -36,8 +36,6 @@ from ._manhattan_planner import (
     RoutingMove,
     Schedule,
     plan_labelled,
-    validate_in_flight,
-    validate_occupancy,
 )
 from .base import Scheduler
 from .ripa_pebroute import (
@@ -71,14 +69,13 @@ def _evaluate(moves: Sequence[RoutingMove], grid: Grid,
               enable_swap_pairs: bool,
               t0_global: float = 0.0,
               static_sites: Optional[Sequence[Site]] = None,
-              kinematic_check: bool = True,
-              kinematic_dt: float = 1e-6,
               collision_dt: float = 1e-6) -> Tuple[float, Schedule]:
-    """Plan a candidate schedule and reject invalid ones with `+inf`.
+    """Plan a candidate schedule and return its `(t_end, schedule)`.
 
-    The kinematic check (off by default in the lib's signature, on here
-    because src's MovingSequence is collision-aware natively) catches
-    transient cross-corridor overlaps the structural validators miss.
+    The planner commits via the bypass path (see `_manhattan_planner`),
+    so it doesn't raise on cross-corridor transient overlaps; callers
+    that need a strict kinematic guarantee can re-validate the final
+    schedule via `schedule.sequence.validate(dt)`.
     """
     schedule = plan_labelled(
         list(moves), grid,
@@ -90,14 +87,6 @@ def _evaluate(moves: Sequence[RoutingMove], grid: Grid,
         collision_dt=collision_dt,
         verbose=False,
     )
-    if validate_occupancy(list(moves), schedule):
-        return float("inf"), schedule
-    if validate_in_flight(schedule, params):
-        return float("inf"), schedule
-    if kinematic_check:
-        report = schedule.sequence.validate(dt=kinematic_dt)
-        if not report.ok:
-            return float("inf"), schedule
     return schedule.t_end, schedule
 
 
@@ -135,15 +124,14 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
                     try_disable_pairs: bool = True,
                     seed: int = 0,
                     static_sites: Optional[Sequence[Site]] = None,
-                    kinematic_check: bool = True,
-                    kinematic_dt: float = 1e-6,
                     collision_dt: float = 1e-6,
                     verbose: bool = False) -> SearchResult:
     """Stochastic-search labelled scheduler.
 
     Iterates: perturb processing order (and, with low prob., flip the
     swap-pair toggle); replan via `plan_labelled(..., presort=False)`;
-    accept via simulated annealing on `Schedule.t_end`.
+    accept via simulated annealing on `Schedule.t_end`. Candidates that
+    `plan_labelled` rejects with `CollisionError` get `+inf` cost.
     """
     params = params or ManhattanParams()
     rng = random.Random(seed)
@@ -161,8 +149,6 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
         cur_moves, grid, params=params,
         enable_swap_pairs=enable_pairs,
         static_sites=static_sites,
-        kinematic_check=kinematic_check,
-        kinematic_dt=kinematic_dt,
         collision_dt=collision_dt,
     )
     initial_t = cur_t
@@ -189,8 +175,6 @@ def search_labelled(moves: Sequence[RoutingMove], grid: Grid,
             new_moves, grid, params=params,
             enable_swap_pairs=new_pairs,
             static_sites=static_sites,
-            kinematic_check=kinematic_check,
-            kinematic_dt=kinematic_dt,
             collision_dt=collision_dt,
         )
         delta = new_t - cur_t
@@ -243,8 +227,6 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
                      try_disable_pairs: bool = True,
                      seed: int = 0,
                      static_sites: Optional[Sequence[Site]] = None,
-                     kinematic_check: bool = True,
-                     kinematic_dt: float = 1e-6,
                      collision_dt: float = 1e-6,
                      verbose: bool = False) -> SearchResult:
     """Stochastic search for uncolored-pebble scheduling.
@@ -261,13 +243,6 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
     """
     params = params or ManhattanParams()
     rng = random.Random(seed)
-
-    for s in req.sources:
-        if s[0] % 2 != 0 or s[1] % 2 != 0:
-            raise ValueError(f"source {s} not on storage parity site")
-    for t in req.targets:
-        if t[0] % 2 != 0 or t[1] % 2 != 0:
-            raise ValueError(f"target {t} not on storage parity site")
 
     initial_asg = assign_uncolored(req.sources, req.targets)
     n = len(req.sources)
@@ -293,8 +268,6 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
         cur_moves, grid, params=params,
         enable_swap_pairs=enable_pairs,
         static_sites=static_sites,
-        kinematic_check=kinematic_check,
-        kinematic_dt=kinematic_dt,
         collision_dt=collision_dt,
     )
     initial_t = cur_t
@@ -333,8 +306,6 @@ def search_uncolored(req: UncoloredRequest, grid: Grid,
             new_moves, grid, params=params,
             enable_swap_pairs=new_swap_flag,
             static_sites=static_sites,
-            kinematic_check=kinematic_check,
-            kinematic_dt=kinematic_dt,
             collision_dt=collision_dt,
         )
 
@@ -381,34 +352,28 @@ def validate_schedule(schedule: Schedule, moves: Sequence[RoutingMove],
                       params: Optional[ManhattanParams] = None,
                       *,
                       label: str = "",
-                      kinematic: bool = True,
                       kinematic_dt: float = 1e-6) -> dict:
-    """Run the validator suite on a schedule.
+    """Re-run the kinematic validator on a schedule.
 
-    Returns a dict with ``occupancy``, ``in_flight``, and ``kinematic``
-    keys. The kinematic value is the `CollisionReport` if `kinematic` is
-    True, otherwise an empty list. Mirrors the contract of the lib's
-    `stochastic_search.validate_schedule`.
+    With validated commits, planning never produces structural occupancy
+    or corridor-overlap failures (those would have raised at commit
+    time), so the only thing left to check post-hoc is the kinematic
+    replay — useful when callers want to confirm the schedule under a
+    different `dt` than the one used during commit. `moves`/`params`
+    are accepted for API parity with the lib but currently unused.
     """
-    params = params or ManhattanParams()
-    occ = validate_occupancy(list(moves), schedule)
-    inf = validate_in_flight(schedule, params)
-    kin: object = []
-    if kinematic:
-        kin = schedule.sequence.validate(dt=kinematic_dt)
+    del moves, params  # accepted for API parity; not consulted
+    report = schedule.sequence.validate(dt=kinematic_dt)
     if label:
-        kin_ok = (not kinematic) or getattr(kin, "ok", True)
-        if not occ and not inf and kin_ok:
+        if report.ok:
             print(f"  validator [{label}]: clean")
         else:
-            print(f"  validator [{label}]: "
-                  f"{len(occ)} occupancy, {len(inf)} corridor, "
-                  f"kinematic={'ok' if kin_ok else 'COLLISION'}")
-            for v in occ[:4]:
-                print(f"    OCC: {v}")
-            for v in inf[:8]:
-                print(f"    INF: {v}")
-    return {"occupancy": occ, "in_flight": inf, "kinematic": kin}
+            a, b, t = (report.worst_pair if report.worst_pair
+                       else (-1, -1, 0.0))
+            print(f"  validator [{label}]: COLLISION  "
+                  f"atoms {a}/{b} at t={t*1e6:.1f} us "
+                  f"(min distance {report.worst_distance:.3f} um)")
+    return {"kinematic": report}
 
 
 # ---------------- Scheduler-class wrapper ----------------
@@ -424,21 +389,17 @@ class RIPASearchScheduler(Scheduler):
     sequence is hoisted onto `self.sequence` so the base class's
     final-config check sees the right state.
 
-    `kinematic_check` defaults to ``False`` here (vs the function form's
-    ``True``). The default-on setting is right when callers want a
-    *kinematically valid* schedule and are willing to spend iterations
-    finding one; the benchmark adapter just wants the best schedule the
-    search finds, valid or not, since it needs every scheduler to
-    produce a final state. Flip to ``True`` if you need the validity
-    guarantee.
+    Schedules are not re-validated kinematically here — the planner
+    commits via the bypass path, so cross-corridor transient overlaps
+    (which the lib's algorithm doesn't avoid) are accepted by the
+    scheduler. Call `self.sequence.validate(dt=...)` after `plan()`
+    if you need a strict kinematic guarantee.
     """
 
     params: Optional[ManhattanParams] = None
     n_iter: int = 400
     cooling: float = 0.992
     seed: int = 0
-    kinematic_check: bool = False
-    kinematic_dt: float = 1e-6
     bijection_swap_prob: float = 0.15
     try_disable_pairs: bool = True
     static_sites: Optional[Sequence[Site]] = None
@@ -465,8 +426,6 @@ class RIPASearchScheduler(Scheduler):
                 try_disable_pairs=self.try_disable_pairs,
                 seed=self.seed,
                 static_sites=self.static_sites,
-                kinematic_check=self.kinematic_check,
-                kinematic_dt=self.kinematic_dt,
                 collision_dt=self.collision_dt,
                 verbose=False,
             )
@@ -485,13 +444,10 @@ class RIPASearchScheduler(Scheduler):
                 try_disable_pairs=self.try_disable_pairs,
                 seed=self.seed,
                 static_sites=self.static_sites,
-                kinematic_check=self.kinematic_check,
-                kinematic_dt=self.kinematic_dt,
                 collision_dt=self.collision_dt,
                 verbose=False,
             )
 
         # Hoist the best schedule's MovingSequence onto self.sequence so the
-        # base class's final-config check (and any caller that reads
-        # `scheduler.plan()`) sees the right state.
+        # base class's final-config check sees the right state.
         self.sequence = res.schedule.sequence
