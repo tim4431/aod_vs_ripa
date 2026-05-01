@@ -1,5 +1,8 @@
 # C++ CCBS Backend
 
+This program is adapted from [Continuous-CBS](https://github.com/PathPlanning/Continuous-CBS), refractored by Codex.
+
+## Usage
 `ccbs_solver.cpp` is a standalone C++17 implementation of the raw CCBS/SIPP
 search used by `src.scheduler.ripa_ccbs_c.RIPACCBSCScheduler`.
 

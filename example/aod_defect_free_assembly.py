@@ -22,7 +22,6 @@ if str(ROOT) not in sys.path:
 from src.atom_config import Grid
 from src.routing import *
 from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
-from src.visualization import render_check_outputs
 
 N = 10
 TARGET_SIDE = 7
@@ -64,20 +63,6 @@ def main() -> None:
         f"aod_steps={len(sequence.steps)}, "
         f"duration={total_us:.3f} us, "
         f"three_step={scheduler.binary_plan.used_three_step}"
-    )
-
-    static_traps = dst
-    render_check_outputs(
-        sequence,
-        OUT_DIR,
-        PREFIX,
-        static_traps=static_traps,
-        view="demo",
-        title_prefix=f"AOD defect-free assembly - target {TARGET_SIDE}x{TARGET_SIDE}",
-        gif_fps=6,
-        gif_hold_seconds=1.5,
-        quality="speed",
-        show_progress=True,
     )
 
 

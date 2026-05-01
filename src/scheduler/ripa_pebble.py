@@ -82,6 +82,8 @@ class RIPAPebbleScheduler(AsyncScheduler):
     handoff_weight: float | None = None
     auxiliary_lane_penalty: float = 0.5
     retry_order_reversals: int = 2
+    unlabeled_assignment: str = "min_sum"
+    """Cost-matrix objective: 'min_sum' (Hungarian) or 'min_max' (bottleneck)."""
     _routes: dict[int, _AtomRoute] = field(default_factory=dict, init=False)
     _stall_count: int = field(default=0, init=False)
 
@@ -91,6 +93,8 @@ class RIPAPebbleScheduler(AsyncScheduler):
             raise ValueError("highway_period must be >= 2")
         if self.max_start_attempts < 1:
             raise ValueError("max_start_attempts must be >= 1")
+        if self.unlabeled_assignment not in ("min_sum", "min_max"):
+            raise ValueError("unlabeled_assignment must be 'min_sum' or 'min_max'")
 
     def target_assignment(self) -> dict[int, Site]:
         """Assign unlabeled atoms by route cost instead of Euclidean distance."""
@@ -107,6 +111,10 @@ class RIPAPebbleScheduler(AsyncScheduler):
             [self._estimated_pair_cost(atom_id, src, dst) for dst in targets]
             for atom_id, src in enumerate(sources)
         ]
+        if self.unlabeled_assignment == "min_max":
+            bottleneck = self._bottleneck_assignment(costs, targets)
+            if bottleneck is not None:
+                return bottleneck
         if n <= self.max_exact_unlabeled_atoms:
             return self._exact_min_cost_assignment(costs, targets)
         linear_assignment = self._linear_sum_assignment(costs, targets)
@@ -620,6 +628,43 @@ class RIPAPebbleScheduler(AsyncScheduler):
             return None
 
         row_ind, col_ind = linear_sum_assignment(costs)
+        return {
+            int(atom_id): targets[int(target_idx)]
+            for atom_id, target_idx in zip(row_ind, col_ind)
+        }
+
+    @staticmethod
+    def _bottleneck_assignment(
+        costs: list[list[float]],
+        targets: list[Site],
+    ) -> dict[int, Site] | None:
+        """Min-max bipartite assignment: minimize the worst single-atom cost,
+        breaking ties by min total cost.
+        """
+        try:
+            import numpy as np
+            from scipy.optimize import linear_sum_assignment
+        except Exception:
+            return None
+
+        C = np.asarray(costs, dtype=float)
+        if C.size == 0:
+            return {}
+        thresholds = np.unique(C)
+        BIG = float(C.max() + 1.0) * (C.shape[0] + 1) + 1.0
+
+        lo, hi = 0, len(thresholds) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            masked = np.where(C <= thresholds[mid] + 1e-15, C, BIG)
+            row_ind, col_ind = linear_sum_assignment(masked)
+            if masked[row_ind, col_ind].max() < BIG:
+                hi = mid
+            else:
+                lo = mid + 1
+
+        masked = np.where(C <= thresholds[lo] + 1e-15, C, BIG)
+        row_ind, col_ind = linear_sum_assignment(masked)
         return {
             int(atom_id): targets[int(target_idx)]
             for atom_id, target_idx in zip(row_ind, col_ind)

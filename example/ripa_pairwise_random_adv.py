@@ -26,7 +26,7 @@ from src.benchmark import benchmark_schedulers, format_benchmark_table
 from src.routing import RoutingRequest, stochastically_loaded_sites
 from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
 from src.sequence import Sequence
-from src.visualization import render_check_outputs
+
 
 N = 10
 ATOM_COUNT = 24
@@ -63,20 +63,6 @@ def assert_request_satisfied(sequence: Sequence, request: RoutingRequest) -> Non
             )
 
 
-def render_pairwise_outputs(sequence: Sequence, request: RoutingRequest) -> None:
-    render_check_outputs(
-        sequence,
-        OUT_DIR,
-        PREFIX,
-        static_traps=request.dst,
-        view="demo",
-        show_atom_ids=True,
-        title_prefix=f"RIPA pebble adv pairwise random - {ATOM_COUNT} atoms",
-        gif_fps=6,
-        gif_time_dilation=3e4,
-        gif_hold_seconds=1.5,
-        quality="speed",
-    )
 
 
 def main() -> None:
@@ -114,9 +100,6 @@ def main() -> None:
     if not result.ok or result.sequence is None:
         raise RuntimeError("ripa_pebble_adv_labeled did not produce a valid route")
     assert_request_satisfied(result.sequence, request)
-
-    if not args.no_render:
-        render_pairwise_outputs(result.sequence, request)
 
 
 if __name__ == "__main__":

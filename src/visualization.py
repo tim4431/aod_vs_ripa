@@ -39,7 +39,6 @@ from .atom_config import Grid  # noqa: E402
 from .atom_trajectory import AtomEnsemble, AtomTrajectory  # noqa: E402
 from .segments import Segment  # noqa: E402
 
-Site = tuple[int, int]
 ToneChannel = Literal["row", "col"]
 ToneHardware = Literal["AOD", "EOM", "AOD/EOM", "tone"]
 PlannedTrajectoryMode = Literal["none", "full", "next"]
@@ -96,21 +95,8 @@ def draw_grid_dots(ax: Any, grid: Grid) -> None:
     ii, jj = np.meshgrid(np.arange(grid.N), np.arange(grid.N), indexing="ij")
     xy = grid.ij_to_xy(np.column_stack([ii.ravel(), jj.ravel()]).astype(float))
     ax.scatter(
-        xy[:, 0], xy[:, 1], s=TRAP_SIZE, c="#9a9a9a",
-        alpha=0.45, linewidths=0, zorder=1,
-    )
-
-
-def draw_static_traps(ax: Any, grid: Grid, sites: Iterable[Site]) -> None:
-    """Draw a blue circle marker at each listed static-trap site."""
-    arr = np.asarray(list(sites), dtype=float).reshape(-1, 2)
-    if not len(arr):
-        return
-    xy = grid.ij_to_xy(arr)
-    ax.scatter(
-        xy[:, 0], xy[:, 1], s=TRAP_SIZE * 2.3,
-        facecolors="none", edgecolors="#4b8bbe",
-        linewidths=0.8, alpha=0.55, zorder=2,
+        xy[:, 0], xy[:, 1], s=TRAP_SIZE * 0.7, c="#9a9a9a",
+        alpha=0.22, linewidths=0, zorder=1,
     )
 
 
@@ -282,7 +268,7 @@ def draw_atoms(
         for a in active
     ]
     linewidths = [
-        2.3 if a and addressed_style in ("edge", "both") else 0.8 for a in active
+        1.4 if a and addressed_style in ("edge", "both") else 0.5 for a in active
     ]
     ax.scatter(
         positions_xy[:, 0], positions_xy[:, 1], s=ATOM_SIZE,
@@ -398,7 +384,6 @@ def draw_atom_panel(
     *,
     quality: RenderQuality = "speed",
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
-    static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
@@ -415,8 +400,6 @@ def draw_atom_panel(
     )
 
     draw_grid_dots(ax, ensemble.grid)
-    if static_traps is not None:
-        draw_static_traps(ax, ensemble.grid, static_traps)
     if show_routing:
         draw_routing_request(ax, ensemble, colors=colors)
     draw_planned_paths(
@@ -448,7 +431,6 @@ def draw_frame(
     quality: RenderQuality = "speed",
     labels: Iterable[str] | None = None,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
-    static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
@@ -461,7 +443,7 @@ def draw_frame(
         fig, ax = plt.subplots(figsize=DEMO_FIGSIZE, constrained_layout=True)
         draw_atom_panel(
             ax, motion, t, quality=quality, atom_colors=atom_colors,
-            static_traps=static_traps, planned_trajectory=planned_trajectory,
+            planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing, title=title,
         )
         return fig, [ax]
@@ -477,11 +459,16 @@ def draw_frame(
         )
         axes_list = list(axes_array.ravel())
         for (label, panel_motion), ax in zip(items, axes_list):
+            panel_ensemble = (
+                panel_motion if isinstance(panel_motion, AtomEnsemble)
+                else panel_motion.ensemble
+            )
+            panel_t = min(float(t), panel_ensemble.total_duration())
             draw_atom_panel(
-                ax, panel_motion, t, quality=quality, atom_colors=atom_colors,
-                static_traps=static_traps, planned_trajectory=planned_trajectory,
+                ax, panel_motion, panel_t, quality=quality, atom_colors=atom_colors,
+                planned_trajectory=planned_trajectory,
                 show_atom_ids=show_atom_ids, show_routing=show_routing,
-                title=f"{label}  -  t = {_format_time_us(t)}",
+                title=f"{label}  -  t = {_format_time_us(panel_t)}",
             )
         if title:
             fig.suptitle(title)
@@ -503,7 +490,7 @@ def draw_frame(
         )
         draw_atom_panel(
             atom_ax, motion, t, quality=quality, atom_colors=atom_colors,
-            static_traps=static_traps, planned_trajectory=planned_trajectory,
+            planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing, title=None,
         )
         draw_current_tones(row_now, ensemble, t, "row", colors=colors)
@@ -550,7 +537,6 @@ def render_animation(
     time_dilation: float = 1e4,
     hold_seconds: float = 1.0,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
-    static_traps: Iterable[Site] | None = None,
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing_on_start: bool = True,
@@ -614,7 +600,7 @@ def render_animation(
     draw_kwargs = dict(
         view=view, quality=quality,
         labels=list(labels) if labels is not None else None,
-        atom_colors=atom_colors, static_traps=static_traps,
+        atom_colors=atom_colors,
         planned_trajectory=planned_trajectory,
         show_atom_ids=show_atom_ids, title=title,
     )
@@ -643,66 +629,6 @@ def render_animation(
         _save_gif_from_pngs(frame_paths, out, fps=fps, show_progress=show_progress)
     return out
 
-
-def render_check_outputs(
-    motion: Any,
-    output_dir: str | Path,
-    prefix: str,
-    *,
-    render_gif: bool = True,
-    gif_fps: int = 8,
-    gif_time_dilation: float = 1e4,
-    gif_hold_seconds: float = 1.0,
-    title_prefix: str | None = None,
-    **visual_kwargs: Any,
-) -> dict[str, Path]:
-    """Render the standard t=0, t=final, and optional GIF check outputs."""
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    visual_kwargs = {"view": "demo", **visual_kwargs}
-    if visual_kwargs.get("labels") is not None:
-        visual_kwargs["labels"] = list(visual_kwargs["labels"])
-    view = visual_kwargs["view"]
-
-    if view == "benchmark":
-        items = _normalize_motion_items(motion, visual_kwargs.get("labels"))
-        final_t = max(
-            (
-                (m if isinstance(m, AtomEnsemble) else m.ensemble).total_duration()
-                for _, m in items
-            ),
-            default=0.0,
-        )
-    else:
-        ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
-        final_t = ensemble.total_duration()
-    label = title_prefix or prefix
-
-    paths = {
-        "t0": out_dir / f"{prefix}_t0.png",
-        "tfinal": out_dir / f"{prefix}_tfinal.png",
-    }
-    animation_only = {"show_progress"}
-    frame_kwargs = {k: v for k, v in visual_kwargs.items() if k not in animation_only}
-
-    save_frame(
-        motion, 0.0, paths["t0"],
-        **{**frame_kwargs, "title": frame_kwargs.get("title", f"{label} - t=0")},
-    )
-    save_frame(
-        motion, final_t, paths["tfinal"],
-        **{**frame_kwargs, "title": frame_kwargs.get("title", f"{label} - final")},
-    )
-
-    if render_gif:
-        paths["gif"] = out_dir / f"{prefix}.gif"
-        anim_kwargs = {k: v for k, v in visual_kwargs.items() if k != "title"}
-        render_animation(
-            motion, paths["gif"], fps=gif_fps,
-            time_dilation=gif_time_dilation, hold_seconds=gif_hold_seconds,
-            **anim_kwargs,
-        )
-    return paths
 
 
 # --- color helpers ---------------------------------------------------------

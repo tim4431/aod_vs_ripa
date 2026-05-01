@@ -55,6 +55,10 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
     staged_target_fill: bool = True
     async_staging: bool = True
     """Use per-atom async starts for staged moves; false serializes each staged leg."""
+    unlabeled_assignment: Literal["min_sum", "min_max"] = "min_sum"
+    """Unlabeled cost-matrix objective. `min_max` (bottleneck) bounds the
+    longest single-atom path so atoms already in target slots also get moved
+    when that helps the makespan; ties are broken by min total cost."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -62,6 +66,8 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             raise ValueError("max_start_attempts must be >= 1")
         if self.handoff_weight < 0:
             raise ValueError("handoff_weight must be non-negative")
+        if self.unlabeled_assignment not in ("min_sum", "min_max"):
+            raise ValueError("unlabeled_assignment must be 'min_sum' or 'min_max'")
 
     def target_assignment(self) -> dict[int, Site]:
         """Assign unlabeled atoms by geometry-route cost."""
@@ -78,6 +84,10 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             [self._estimated_pair_cost(atom_id, src, dst) for dst in targets]
             for atom_id, src in enumerate(sources)
         ]
+        if self.unlabeled_assignment == "min_max":
+            bottleneck = self._bottleneck_assignment(costs, targets)
+            if bottleneck is not None:
+                return bottleneck
         if n <= self.max_exact_unlabeled_atoms:
             return self._exact_min_cost_assignment(costs, targets)
         linear_assignment = self._linear_sum_assignment(costs, targets)
@@ -86,12 +96,17 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
         return self._greedy_min_cost_assignment(costs, targets)
 
     def _plan(self) -> None:
-        if (
+        # Staged compaction does its own greedy moves and bypasses
+        # target_assignment(); skip it under min_max so the bottleneck
+        # assignment actually drives routing.
+        use_staged = (
             self.staged_target_fill
+            and not (not self.request.labeled and self.unlabeled_assignment == "min_max")
             and len(self.request.dst) == len(self.request.src)
             and len(self.request.dst)
             <= (self.request.grid.N * self.request.grid.N) // 2
-        ):
+        )
+        if use_staged:
             if self.request.labeled:
                 self._plan_labeled_target_set_with_fallback()
             else:
@@ -785,6 +800,45 @@ class RIPAPebbleAdvScheduler(AsyncScheduler):
             return None
 
         row_ind, col_ind = linear_sum_assignment(costs)
+        return {
+            int(atom_id): targets[int(target_idx)]
+            for atom_id, target_idx in zip(row_ind, col_ind)
+        }
+
+    @staticmethod
+    def _bottleneck_assignment(
+        costs: list[list[float]],
+        targets: list[Site],
+    ) -> dict[int, Site] | None:
+        """Min-max bipartite assignment: minimize the worst single-atom cost,
+        breaking ties by min total cost. Returns None if scipy is unavailable.
+        """
+        try:
+            import numpy as np
+            from scipy.optimize import linear_sum_assignment
+        except Exception:
+            return None
+
+        C = np.asarray(costs, dtype=float)
+        if C.size == 0:
+            return {}
+        thresholds = np.unique(C)
+        BIG = float(C.max() + 1.0) * (C.shape[0] + 1) + 1.0
+
+        # Binary search for the smallest threshold admitting a perfect matching.
+        lo, hi = 0, len(thresholds) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            masked = np.where(C <= thresholds[mid] + 1e-15, C, BIG)
+            row_ind, col_ind = linear_sum_assignment(masked)
+            if masked[row_ind, col_ind].max() < BIG:
+                hi = mid
+            else:
+                lo = mid + 1
+
+        # Final assignment: min-sum within the threshold-feasible subgraph.
+        masked = np.where(C <= thresholds[lo] + 1e-15, C, BIG)
+        row_ind, col_ind = linear_sum_assignment(masked)
         return {
             int(atom_id): targets[int(target_idx)]
             for atom_id, target_idx in zip(row_ind, col_ind)

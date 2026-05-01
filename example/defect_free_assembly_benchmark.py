@@ -95,9 +95,8 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        static_traps=list(dst),
         fps=fps,
-        time_dilation=3e4,
+        time_dilation=2e4,
         hold_seconds=1.5,
         title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
     )
