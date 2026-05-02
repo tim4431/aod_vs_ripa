@@ -27,7 +27,9 @@ The RIPA completes the assembly within `497 us`, while both aod compiles to `~2m
 
 ## Pair-wise rearrangment
 
-**Inversion of an atom array**
+**Inversion of an atom array (The comparison is not fair, AOD has log(L) re-arrangement algorithm, so does RIPA)**
+**Please wait for later updates**
+
 
 Routing atoms encoded with quantum information, now the atoms are not treated as identical, and the routing is a pair-wise rearrangement problem.
 
