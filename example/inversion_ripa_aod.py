@@ -1,6 +1,7 @@
 """Manual AOD vs C++ CCBS windowed x-inversion benchmark.
 
-Two ways to invert a 6x6 array on the same shared physics clock:
+Two ways to invert a side=6 array on the same shared physics clock,
+rendered for both the 6x6 and the 1x6 (single-row) variants:
 
 * `AOD manual` -- hand-rolled column moves. Phase 1 slides five columns
   (in user pos notation: 5->-1, 0->5, 4->0, 1->4, 3->1) using one
@@ -12,7 +13,8 @@ Two ways to invert a 6x6 array on the same shared physics clock:
 
   Each phase-1 transport is wrapped in a 1-row j bias (bias up, transport
   in i, drop back down) so the AOD trap clears the central storage rows
-  during transit.
+  during transit. The 1x6 generalization is automatic: the j set just
+  becomes a single row.
 
 * `C++ CCBS windowed` -- the windowed CCBS solver from
   `ripa_ccbs_c_x_inversion_demo.py` on the same labeled centered mirror
@@ -40,6 +42,7 @@ from src.movement import AODStep
 from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.base import SyncScheduler
 from src.scheduler.ccbs_c import RIPACCBSWindowedScheduler
+from src.scheduler.ripa_pebroute import RIPAPebRouteScheduler
 from src.visualization import render_animation
 
 N = 24
@@ -47,12 +50,8 @@ TARGET_SIDE = 6
 STORAGE_PERIOD = 2
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 4.0
-COLLISION_DT = 5e-6
-
-PREFIX = "inversion_6x6_ccbs_aod"
 
 CCBS_KWARGS = dict(
-    collision_dt=COLLISION_DT,
     ccbs_precision=1e-6,
     time_limit=5.0,
     max_high_level_nodes=50_000,
@@ -119,7 +118,7 @@ class ManualAODXInversionScheduler(SyncScheduler):
 
 
 # Dict order = panel order. Keys also become panel labels.
-SCHEDULERS = {
+SCHEDULERS_6X6 = {
     "AOD manual": ManualAODXInversionScheduler,
     "C++ CCBS windowed": lambda req: RIPACCBSWindowedScheduler(
         req,
@@ -129,33 +128,33 @@ SCHEDULERS = {
     ),
 }
 
+SCHEDULERS_1X6 = {
+    "AOD manual": ManualAODXInversionScheduler,
+    "ripa_pebroute": RIPAPebRouteScheduler,
+}
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Manual AOD vs C++ CCBS windowed x-inversion benchmark."
-    )
-    parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="render a high-quality GIF into demo/ instead of a quick render/ check",
-    )
-    parser.add_argument(
-        "--no-render",
-        action="store_true",
-        help="print the benchmark table only and skip rendering",
-    )
-    args = parser.parse_args()
 
-    grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
-    src = centered_storage_square(N, TARGET_SIDE, STORAGE_PERIOD)
+def _centered_row(N: int, side: int, period: int) -> list[tuple[int, int]]:
+    """Centered 1xside line on the storage subgrid (mirrors centered_storage_square)."""
+    storage = list(range(0, N, period))
+    center = (N - 1) / 2
+    s = min(
+        range(len(storage) - side + 1),
+        key=lambda i: abs((storage[i] + storage[i + side - 1]) / 2 - center),
+    )
+    j = min(storage, key=lambda x: abs(x - center))
+    return [(storage[i], j) for i in range(s, s + side)]
+
+
+def _run(label: str, src, grid: Grid, schedulers, args: argparse.Namespace) -> None:
     dst = x_inverted_targets(src)
     request = RoutingRequest(grid=grid, src=src, dst=dst, labeled=True)
     print(
-        f"N={N}, storage_period={STORAGE_PERIOD}, "
-        f"atoms={len(src)} ({TARGET_SIDE}x{TARGET_SIDE}), task=x-inversion"
+        f"\n[{label}] N={N}, storage_period={STORAGE_PERIOD}, "
+        f"atoms={len(src)}, task=x-inversion"
     )
 
-    results = benchmark_schedulers(request, SCHEDULERS, validate_dt=COLLISION_DT)
+    results = benchmark_schedulers(request, schedulers)
     print(format_benchmark_table(results))
 
     failures = [r for r in results if not r.ok]
@@ -168,13 +167,14 @@ def main() -> None:
         return
 
     by_name = {r.name: r.sequence for r in results}
-    panels = {name: by_name[name] for name in SCHEDULERS}
+    panels = {name: by_name[name] for name in schedulers}
 
+    prefix = f"inversion_{label}_ripa_aod"
     if args.demo:
-        out_path = ROOT / "demo" / f"{PREFIX}.gif"
+        out_path = ROOT / "demo" / f"{prefix}.gif"
         quality = "quality"
     else:
-        out_path = ROOT / "render" / f"{PREFIX}.gif"
+        out_path = ROOT / "render" / f"{prefix}.gif"
         quality = "speed"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,9 +187,32 @@ def main() -> None:
         hold_seconds=1.5,
         atom_colors=x_gradient_colors(src),
         show_routing_on_start=False,
-        title=f"AOD vs CCBS x-inversion ({TARGET_SIDE}x{TARGET_SIDE})",
+        title=f"AOD vs CCBS x-inversion ({label})",
     )
     print(f"wrote {out_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Manual AOD vs C++ CCBS windowed x-inversion benchmark."
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="render high-quality GIFs into demo/ instead of quick render/ checks",
+    )
+    parser.add_argument(
+        "--no-render",
+        action="store_true",
+        help="print the benchmark tables only and skip rendering",
+    )
+    args = parser.parse_args()
+
+    grid = Grid(N=N, d=GRID_SPACING_UM, rc=COLLISION_RADIUS_UM)
+    _run("6x6", centered_storage_square(N, TARGET_SIDE, STORAGE_PERIOD), grid,
+         SCHEDULERS_6X6, args)
+    _run("1x6", _centered_row(N, TARGET_SIDE, STORAGE_PERIOD), grid,
+         SCHEDULERS_1X6, args)
 
 
 if __name__ == "__main__":

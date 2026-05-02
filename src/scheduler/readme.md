@@ -20,6 +20,8 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 | [`UnlabeledRIPAPebbleAdvScheduler`](ripa_pebble_adv.py) | Async | Unlabeled | RIPA |
 | [`RIPACCBSCScheduler`](ccbs_c/ripa_ccbs_c.py) | Async | Both | RIPA |
 | [`RIPACCBSWindowedScheduler`](ccbs_c/ripa_ccbs_c_windowed.py) | Async | Both | RIPA |
+| [`RIPAPebRouteScheduler`](ripa_pebroute.py) | Async | Both | RIPA |
+| [`RIPASearchScheduler`](ripa_stochastic_search.py) | Async | Both | RIPA |
 
 ## Description of the schedulers
 
@@ -38,6 +40,10 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 `RIPACCBSCScheduler` builds the RIPA route graph, calls the standalone C++ CCBS backend, and emits the returned timed paths as validated RIPA trajectories. The Python side is only solver IO plus trajectory translation; the CCBS/SIPP search lives in C++.
 
 `RIPACCBSWindowedScheduler` is an experimental decomposed wrapper around the C++ backend. For labeled single-axis reciprocal swap permutations, such as row/column inversions, it groups small nested swap windows before calling CCBS so local asynchronous overlap can be discovered; symmetric windows are translated across identical rows/columns, hard windows fall back to pairwise CCBS, and unsupported requests fall back to `RIPACCBSCScheduler`.
+
+`RIPAPebRouteScheduler` maps the request to the classical pebble-motion problem and routes it through the shared Manhattan-corridor planner ([`_manhattan_planner.plan_labelled`](_manhattan_planner.py)) with corridor reservation tables and `a_max`-aware timing. For unlabeled requests it first picks a Hungarian-optimal source→target bijection (`assign_uncolored`) that minimizes total Manhattan distance, then routes as if labeled.
+
+`RIPASearchScheduler` wraps the same Manhattan-corridor planner in a simulated-annealing loop over the knobs the greedy planner picks deterministically: atom processing order, the `enable_swap_pairs` joint planner toggle, and (unlabeled only) local 2-target bijection swaps away from the Hungarian-optimal assignment. Candidates that fail the pairwise close-approach check are tagged `+inf` so SA never picks them; the best collision-free sequence is hoisted onto `self.sequence`.
 
 ## Search and benchmarking helpers
 

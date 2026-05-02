@@ -51,8 +51,22 @@ RenderFormat = Literal["gif", "webp", "apng"]
 
 ATOM_SIZE = 40.0
 GRIDPOINT_SIZE = 12.0
+BLOB_SIGMA = 1.5  # gaussian halo std-dev (um, in xy data coords)
 TIME_FACTOR_US = 1e6
 FREQ_LABEL = "nu / FSR1 (mod 1)"
+
+# Render z-order layering, low -> high. Anything painted with a higher
+# zorder draws on top of lower zorder layers.
+Z_GRID_DOTS = 1.0       # background lattice dots
+Z_GRID_FRAME = 1.2      # dashed grid bbox
+Z_PLANNED_PATH = 2.0    # dashed future trajectories
+Z_ROUTING_ARROW = 2.2   # src->dst arrows
+Z_MOTION_TRAIL = 2.5    # motion blur trail line
+Z_MOTION_DOT = 2.7      # motion blur fade dots
+Z_TRAP_BLOB = 4.0       # soft red gaussian halo (under atoms)
+Z_ATOM = 5.0            # atom marker
+Z_TRAP_OUTLINE = 6.0    # ring around addressed atom / square for empty AOD trap
+Z_ATOM_ID = 7.0         # atom-id text label
 
 DEMO_FIGSIZE = (5.4, 5.2)
 DETAIL_FIGSIZE = (12.0, 6.2)
@@ -73,7 +87,7 @@ class _Style:
 
 _QUALITY: dict[RenderQuality, _Style] = {
     "speed": _Style(
-        dpi=80,
+        dpi=60,
         fps=6,
         addressed_style="edge",
         show_motion_blur=False,
@@ -82,7 +96,7 @@ _QUALITY: dict[RenderQuality, _Style] = {
         planned_samples_per_segment=18,
     ),
     "quality": _Style(
-        dpi=120,
+        dpi=100,
         fps=20,
         addressed_style="blob",
         show_motion_blur=True,
@@ -102,7 +116,7 @@ def draw_grid_dots(ax: Any, grid: Grid) -> None:
     xy = grid.ij_to_xy(np.column_stack([ii.ravel(), jj.ravel()]).astype(float))
     ax.scatter(
         xy[:, 0], xy[:, 1], s=GRIDPOINT_SIZE * 0.7, c="#9a9a9a",
-        alpha=0.22, linewidths=0, zorder=1,
+        alpha=0.22, linewidths=0, zorder=Z_GRID_DOTS,
     )
 
 
@@ -116,7 +130,7 @@ def draw_grid_frame(ax: Any, grid: Grid) -> None:
     ax.add_patch(
         Rectangle(
             (b0, b0), width, width, fill=False, linestyle="--",
-            linewidth=1.0, edgecolor="#bbbbbb", zorder=1.5,
+            linewidth=1.0, edgecolor="#bbbbbb", zorder=Z_GRID_FRAME,
         )
     )
     ax.set_xlim(lo - grid.d, hi + grid.d)
@@ -126,45 +140,73 @@ def draw_grid_frame(ax: Any, grid: Grid) -> None:
     ax.set_ylabel("y (um)")
 
 
-def draw_aod_traps(
+def draw_traps(
     ax: Any,
     sequence: Any,
     t: float,
     *,
     addressed_style: AddressedStyle = "edge",
 ) -> None:
-    """Mark every active AOD trap *not* currently holding an atom.
+    """Mark active traps for AOD and RIPA hardware.
 
-    `addressed_style` matches the atom-rendering convention: "edge" draws a
-    red square outline, "blob" draws a soft red Gaussian halo, "both" draws
-    each, "none" suppresses the markers.
+    Two styles share one red color. Traps that hold an atom (any active
+    AOD or RIPA segment) are drawn as a circle ring around the atom.
+    AOD lattice intersections that hold no atom are drawn as an empty
+    red square. `addressed_style`: "edge" uses ring/square outlines,
+    "blob" uses a soft Gaussian halo, "both" draws each, "none" skips.
     """
     if addressed_style == "none":
         return
     ensemble = getattr(sequence, "ensemble", None)
     steps = getattr(sequence, "steps", None)
-    if ensemble is None or not steps:
+    if ensemble is None:
         return
-    xy = _active_aod_traps_xy(steps, ensemble, t)
-    if not len(xy):
-        return
-    atom_xy = ensemble.grid.ij_to_xy(ensemble.positions_at(t))
-    if len(atom_xy):
-        tol = ensemble.grid.d * 1e-3
-        dists = np.linalg.norm(xy[:, None, :] - atom_xy[None, :, :], axis=2)
-        xy = xy[~(dists < tol).any(axis=1)]
-        if not len(xy):
-            return
+
+    # Atoms in any active segment (AOD or RIPA) -> ring around the atom.
+    addressed_ij = [
+        atom.position_at(t)
+        for atom in ensemble.atomtrajs
+        if _active_segment(atom, t) is not None
+    ]
+    addressed_xy = (
+        ensemble.grid.ij_to_xy(np.asarray(addressed_ij, dtype=float))
+        if addressed_ij else np.empty((0, 2), dtype=float)
+    )
+
+    # AOD lattice intersections with no atom -> empty square.
+    empty_aod_xy = (
+        _active_aod_traps_xy(steps, ensemble, t)
+        if steps else np.empty((0, 2), dtype=float)
+    )
+    if len(empty_aod_xy):
+        atom_xy = ensemble.grid.ij_to_xy(ensemble.positions_at(t))
+        if len(atom_xy):
+            tol = ensemble.grid.d * 1e-3
+            dists = np.linalg.norm(
+                empty_aod_xy[:, None, :] - atom_xy[None, :, :], axis=2,
+            )
+            empty_aod_xy = empty_aod_xy[~(dists < tol).any(axis=1)]
+
     if addressed_style in ("blob", "both"):
-        sigma = max(ensemble.grid.d * 0.22, 1e-9)
-        for x, y in xy:
-            _draw_gaussian_blob(ax, float(x), float(y), sigma)
+        for x, y in addressed_xy:
+            _draw_gaussian_blob(ax, float(x), float(y))
+        for x, y in empty_aod_xy:
+            _draw_gaussian_blob(ax, float(x), float(y))
     if addressed_style in ("edge", "both"):
-        ax.scatter(
-            xy[:, 0], xy[:, 1], s=GRIDPOINT_SIZE * 5.0, marker="s",
-            facecolors="none", edgecolors="#d62728",
-            linewidths=1.1, alpha=0.70, zorder=3.6,
-        )
+        if len(addressed_xy):
+            ax.scatter(
+                addressed_xy[:, 0], addressed_xy[:, 1],
+                s=ATOM_SIZE * 2.0, marker="o",
+                facecolors="none", edgecolors="#d62728",
+                linewidths=1.4, alpha=0.85, zorder=Z_TRAP_OUTLINE,
+            )
+        if len(empty_aod_xy):
+            ax.scatter(
+                empty_aod_xy[:, 0], empty_aod_xy[:, 1],
+                s=GRIDPOINT_SIZE * 5.0, marker="s",
+                facecolors="none", edgecolors="#d62728",
+                linewidths=1.1, alpha=0.70, zorder=Z_TRAP_OUTLINE,
+            )
 
 
 def draw_routing_request(
@@ -199,7 +241,7 @@ def draw_routing_request(
                 shrinkA=4,
                 shrinkB=4,
             ),
-            zorder=2.6,
+            zorder=Z_ROUTING_ARROW,
         )
 
 
@@ -227,7 +269,7 @@ def draw_planned_paths(
             if len(xy) > 1:
                 ax.plot(
                     xy[:, 0], xy[:, 1], linestyle="--", linewidth=1.1,
-                    color=colors[idx], alpha=0.34, zorder=2.5,
+                    color=colors[idx], alpha=0.34, zorder=Z_PLANNED_PATH,
                 )
 
 
@@ -252,13 +294,16 @@ def draw_motion_blur(
         if len(xy) <= 1:
             continue
         color = colors[idx]
-        ax.plot(xy[:, 0], xy[:, 1], color=color, linewidth=4.0, alpha=0.20, zorder=3)
+        ax.plot(
+            xy[:, 0], xy[:, 1], color=color, linewidth=4.0, alpha=0.20,
+            zorder=Z_MOTION_TRAIL,
+        )
         fade = np.linspace(0.08, 0.32, len(xy))
         sizes = np.linspace(ATOM_SIZE * 0.15, ATOM_SIZE * 0.55, len(xy))
         for (x, y), alpha, size in zip(xy, fade, sizes):
             ax.scatter(
                 [x], [y], s=size, c=[color], alpha=float(alpha),
-                linewidths=0, zorder=3.2,
+                linewidths=0, zorder=Z_MOTION_DOT,
             )
 
 
@@ -268,35 +313,15 @@ def draw_atoms(
     t: float,
     *,
     colors: list[Any] | None = None,
-    addressed_style: AddressedStyle = "edge",
     show_atom_ids: bool = False,
 ) -> None:
-    """Draw atoms at their positions at time `t`, highlighting those currently moving."""
+    """Draw atoms at their positions at time `t`. Trap markers live in `draw_traps`."""
     colors = colors or _default_colors(ensemble)
     grid = ensemble.grid
     positions_xy = grid.ij_to_xy(ensemble.positions_at(t))
-    n = len(positions_xy)
-    active = np.zeros(n, dtype=bool)
-    for idx, atom in enumerate(ensemble.atomtrajs):
-        if _active_segment(atom, t) is not None:
-            active[idx] = True
-
-    if addressed_style in ("blob", "both"):
-        sigma = max(grid.d * 0.22, 1e-9)
-        for idx in np.flatnonzero(active):
-            x, y = positions_xy[idx]
-            _draw_gaussian_blob(ax, float(x), float(y), sigma)
-
-    edgecolors = [
-        "#d62728" if a and addressed_style in ("edge", "both") else "#ffffff"
-        for a in active
-    ]
-    linewidths = [
-        1.4 if a and addressed_style in ("edge", "both") else 0.5 for a in active
-    ]
     ax.scatter(
         positions_xy[:, 0], positions_xy[:, 1], s=ATOM_SIZE,
-        c=colors, edgecolors=edgecolors, linewidths=linewidths, zorder=5,
+        c=colors, edgecolors="#ffffff", linewidths=0.5, zorder=Z_ATOM,
     )
 
     if show_atom_ids:
@@ -305,7 +330,7 @@ def draw_atoms(
             ax.text(
                 x, y + offset, str(int(atom.atom_id)),
                 ha="center", va="bottom", fontsize=7,
-                color=_darken_color(color), zorder=6,
+                color=_darken_color(color), zorder=Z_ATOM_ID,
             )
 
 
@@ -438,11 +463,10 @@ def draw_atom_panel(
             ax, ensemble, t, samples=style.trail_samples, colors=colors
         )
     draw_atoms(
-        ax, ensemble, t, colors=colors,
-        addressed_style=addressed_style, show_atom_ids=show_atom_ids,
+        ax, ensemble, t, colors=colors, show_atom_ids=show_atom_ids,
     )
     if sequence is not None and not finished:
-        draw_aod_traps(ax, sequence, t, addressed_style=addressed_style)
+        draw_traps(ax, sequence, t, addressed_style=addressed_style)
     draw_grid_frame(ax, ensemble.grid)
     ax.set_title(title or f"atom motion  -  t = {_format_time_us(t)}")
 
@@ -638,12 +662,15 @@ def render_animation(
     if has_routing_frame:
         plan.append((float(moving_times[0]), True))
         durations.append(hold_ms)
+    elif hold_ms > 0:
+        # Intro hold without routing arrows: render slightly before t=0 so
+        # no segments are active and `draw_traps` finds nothing to draw.
+        plan.append((-1e-9, False))
+        durations.append(hold_ms)
     for t in moving_times:
         plan.append((float(t), False))
         durations.append(frame_dur_ms)
     if hold_ms > 0:
-        if not has_routing_frame:
-            durations[0] += hold_ms
         durations[-1] += hold_ms
 
     draw_kwargs = dict(
@@ -999,20 +1026,20 @@ def _next_tone_trajectory_by_atom(
 # --- assorted small helpers ------------------------------------------------
 
 
-def _draw_gaussian_blob(ax: Any, x: float, y: float, sigma: float) -> None:
-    """Draw a soft red Gaussian halo at (x, y) to highlight an addressed atom."""
-    r = 3.0 * sigma
-    vals = np.linspace(-r, r, 31)
+def _draw_gaussian_blob(ax: Any, x: float, y: float) -> None:
+    """Draw a soft red Gaussian halo at (x, y) using BLOB_SIGMA, under the atom layer."""
+    r = 3.0 * BLOB_SIGMA
+    vals = np.linspace(-r, r, 21)
     xx, yy = np.meshgrid(vals, vals)
-    zz = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
+    zz = np.exp(-(xx**2 + yy**2) / (2.0 * BLOB_SIGMA**2))
     ax.imshow(
         zz,
         extent=(x - r, x + r, y - r, y + r),
         origin="lower",
         cmap="Reds",
-        alpha=0.33 * zz,
+        alpha=0.55 * zz,
         interpolation="bilinear",
-        zorder=4,
+        zorder=Z_TRAP_BLOB,
     )
 
 
