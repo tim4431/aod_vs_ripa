@@ -18,7 +18,7 @@ For detailed comparison, see [aod_vs_ripa.md](doc/aod_vs_ripa.md)
 
 Routing identical atoms, for example, in the case of assembling a defect-free array, is a good example to compare the two tools.
 
-The RIPA scheduler used here is a simple heuristic scheduler [`RIPAPebbleAdvScheduler`](./src/scheduler/ripa_pebble_adv.py). We choose two AOD schedulers to compare with, one is the [Tetris](https://journals.aps.org/prapplied/abstract/10.1103/PhysRevApplied.19.054032) suitable for stochastic reservoir loading with postselection; and the other one is a [Sqrt-time scheduler](https://arxiv.org/pdf/2604.05317v1) that fully utilizes the parallelism of the AOD to solve a binary-grid reconfiguration problem.
+The RIPA scheduler (left) used here is a simple heuristic scheduler [`RIPAPebbleAdvScheduler`](./src/scheduler/ripa_pebble_adv.py). We choose two AOD schedulers to compare with, one is the [Tetris](https://journals.aps.org/prapplied/abstract/10.1103/PhysRevApplied.19.054032) (middle) suitable for stochastic reservoir loading with postselection; and the other one is a [Sqrt-time](https://arxiv.org/pdf/2604.05317v1) (right) that fully utilizes the parallelism of the AOD to solve an arbitrary binary-grid reconfiguration problem.
 
 ![defect free assembly](demo/defect_free_assembly_benchmark.gif)
 
@@ -31,13 +31,16 @@ The RIPA completes the assembly within `497 us`, while both aod compiles to `~2m
 
 Routing atoms encoded with quantum information, now the atoms are not treated as identical, and the routing is a pair-wise rearrangement problem.
 
-Here we represent an inversion operation of a `1xN (N=6)` atom array. We can see the RIPA arranger can perform the inversion in a 1-step fashion, while the AOD arranger needs to perform this in multiple (N) steps. Moreover, RIPA does not require a hand-off between AOD and SLM traps which could potentially introduce atom loss.
+Here we represent an inversion operation of a `1x6` atom array. We can see the RIPA arranger (right) can perform the inversion in a 1-step fashion, while the AOD arranger (left) needs to perform this in multiple steps. Moreover, RIPA does not require a hand-off between AOD and SLM traps which could potentially introduce atom loss.
 
 ![inversion 1x6 benchmark](demo/inversion_1x6_ripa_aod.gif)
 
-With a 6x6 atom array, where AOD gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. Assume we have the same throughput (1 channel per adjacent row/column within atom array), the RIPA scheduler still takes less time due to its flexible routing capability.
+The performance boost (`2159 us` to `451 us`) is huge.
+
+With a 6x6 atom array, where AOD arranger(left) gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. Assume we have the same throughput (1 channel per adjacent row/column within atom array), the RIPA scheduler (right) still takes less time due to its flexible routing capability.
 
 ![inversion 6x6 benchmark](demo/inversion_6x6_ripa_aod.gif)
+
 
 
 ## How does a RIPA transportation work

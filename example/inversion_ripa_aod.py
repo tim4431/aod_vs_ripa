@@ -120,7 +120,7 @@ class ManualAODXInversionScheduler(SyncScheduler):
 # Dict order = panel order. Keys also become panel labels.
 SCHEDULERS_6X6 = {
     "AOD manual": ManualAODXInversionScheduler,
-    "C++ CCBS windowed": lambda req: RIPACCBSWindowedScheduler(
+    "RIPA_ccbs": lambda req: RIPACCBSWindowedScheduler(
         req,
         **CCBS_KWARGS,
         grouped_time_limit=15.0,
@@ -130,7 +130,7 @@ SCHEDULERS_6X6 = {
 
 SCHEDULERS_1X6 = {
     "AOD manual": ManualAODXInversionScheduler,
-    "ripa_pebroute": RIPAPebRouteScheduler,
+    "RIPA_pebroute": RIPAPebRouteScheduler,
 }
 
 
