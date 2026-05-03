@@ -38,7 +38,7 @@ from src.atom_trajectory import AtomEnsemble
 from src.movement import Step
 from src.moving_sequence import MovingSequence
 from src.routing import RoutingRequest, Site
-from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
+from src.scheduler.heuristic.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.segments import make_hold
 from src.visualization import render_animation
 

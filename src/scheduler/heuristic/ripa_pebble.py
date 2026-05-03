@@ -23,11 +23,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
-from ..atom_trajectory import CollisionError
-from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
-from ..routing import Site
-from ..segments import bang_bang_duration
-from .base import AsyncScheduler
+from ...atom_trajectory import CollisionError
+from ...movement import PHYS_A_MAX, RIPAStep, grid_accel_from_phys
+from ...routing import Site
+from ...segments import bang_bang_duration
+from ..base import AsyncScheduler
 
 Channel = Literal["row", "col"]
 LaneKind = Literal["hrow", "hcol", "direct_row", "direct_col"]
@@ -510,13 +510,13 @@ class RIPAPebbleScheduler(AsyncScheduler):
         return max(0.25 * self._unit_leg_duration(), 10.0 * self.collision_dt)
 
     def _unit_leg_duration(self) -> float:
-        a = grid_accel_from_phys(PHYS_A_MAX_RIPA, self.request.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
         return bang_bang_duration(1.0, a)
 
     def _route_duration(self, current: Site, waypoints: list[Site]) -> float:
         total = 0.0
         pos = tuple(current)
-        a = grid_accel_from_phys(PHYS_A_MAX_RIPA, self.request.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
         for nxt in waypoints:
             total += bang_bang_duration(self._manhattan(pos, tuple(nxt)), a)
             pos = tuple(nxt)

@@ -42,12 +42,12 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..atom_config import AtomConfig, Grid
-from ..atom_trajectory import CollisionError  # noqa: F401  (re-exported for callers)
-from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
-from ..moving_sequence import MovingSequence
-from ..routing import Site
-from ..segments import bang_bang_duration, make_const_acc_segment
+from ...atom_config import AtomConfig, Grid
+from ...atom_trajectory import CollisionError  # noqa: F401  (re-exported for callers)
+from ...movement import PHYS_A_MAX, RIPAStep, grid_accel_from_phys
+from ...moving_sequence import MovingSequence
+from ...routing import Site
+from ...segments import bang_bang_duration, make_const_acc_segment
 
 
 # ---------------- per-atom request + result types ----------------
@@ -613,7 +613,7 @@ def plan_labelled(moves: Sequence[RoutingMove], grid: Grid,
     their own state; when `None` the planner builds a fresh one from
     `moves` + `static_sites`.
     """
-    accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, grid.d)
+    accel = grid_accel_from_phys(PHYS_A_MAX, grid.d)
     if r_safe is None:
         r_safe = grid.rc / grid.d
 

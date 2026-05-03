@@ -32,15 +32,15 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ..atom_config import Grid
-from ..moving_sequence import MovingSequence
-from ..routing import Site
+from ...atom_config import Grid
+from ...moving_sequence import MovingSequence
+from ...routing import Site
 from ._manhattan_planner import (
     RoutingMove,
     T_HANDOFF_DEFAULT,
     plan_labelled,
 )
-from .base import Scheduler
+from ..base import Scheduler
 
 
 # ---------------- request types ----------------

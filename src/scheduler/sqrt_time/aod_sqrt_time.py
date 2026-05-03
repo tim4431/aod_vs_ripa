@@ -42,9 +42,9 @@ import heapq
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from ..movement import AODStep
-from ..routing import Site
-from .base import SyncScheduler
+from ...movement import AODStep
+from ...routing import Site
+from ..base import SyncScheduler
 
 GridMatrix = list[list[int]]
 

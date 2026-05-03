@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from ...atom_trajectory import AtomEnsemble, CollisionError, CollisionReport
-from ...movement import PHYS_A_MAX_RIPA, Step, grid_accel_from_phys
+from ...movement import PHYS_A_MAX, Step, grid_accel_from_phys
 from ...routing import Site
 from ...segments import Segment, bang_bang_duration, make_const_acc_segment
 from ..base import AsyncScheduler
@@ -66,7 +66,7 @@ class _CCBSPlanStep(Step):
     start_time: float = 0.0
 
     def apply(self, ensemble: AtomEnsemble) -> None:
-        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         by_atom: dict[int, list[Segment]] = {}
 
         for spec in self.segments:
@@ -94,7 +94,7 @@ class _CCBSPlanStep(Step):
             raise
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
-        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         latest = self.start_time
         for spec in self.segments:
             distance = math.hypot(
@@ -363,7 +363,7 @@ class RIPACCBSCScheduler(AsyncScheduler):
         return int(site[0]) * self.request.grid.N + int(site[1])
 
     def _move_duration(self, distance: float) -> float:
-        accel = grid_accel_from_phys(PHYS_A_MAX_RIPA, self.request.grid.d)
+        accel = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
         return bang_bang_duration(float(distance), accel)
 
     # ---- C++ solver IO --------------------------------------------------

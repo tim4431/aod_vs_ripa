@@ -21,9 +21,9 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Literal
 
-from ..movement import RIPAStep
-from ..routing import Site
-from .base import SyncScheduler
+from ...movement import RIPAStep
+from ...routing import Site
+from ..base import SyncScheduler
 
 Channel = Literal["row", "col"]
 Lane = tuple[Literal["hrow", "hcol", "direct_row", "direct_col"], int]

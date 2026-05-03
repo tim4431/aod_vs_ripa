@@ -34,14 +34,11 @@ from typing import Literal
 from .atom_trajectory import AtomEnsemble
 from .segments import bang_bang_duration, make_const_acc_segment
 
-# --- physical-acceleration ceilings -----------------------------------------
+# --- physical-acceleration ceiling ------------------------------------------
 #
-# Tune these to match the actual hardware. AOD and RIPA are listed
-# separately because per-atom heating / loss budgets can differ even
-# when the trap optics are similar; in many systems they end up equal.
+# Tune to match the actual hardware. Shared by AOD and RIPA moves.
 
-PHYS_A_MAX_AOD: float = 2750.0  # m/s^2 — synchronous AOD lattice ops
-PHYS_A_MAX_RIPA: float = 2750.0  # m/s^2 — RIPA per-atom moves
+PHYS_A_MAX: float = 2750.0  # m/s^2
 
 
 def grid_accel_from_phys(phys_a_m_s2: float, grid_d_um: float) -> float:
@@ -76,9 +73,6 @@ class AODStep(Step):
     via one RF tone per row and one per col. Atoms sitting at any of those
     intersections move together; their (row, col) indices remap to the
     matching entries in `new_rows`, `new_cols`. Lengths must match.
-
-    Monotonicity (no row/col crossings) is the caller's responsibility —
-    the sqrt-time scheduler emits monotone shifts by construction.
     """
 
     start_time: float
@@ -92,6 +86,20 @@ class AODStep(Step):
             raise ValueError("selected_rows and new_rows must have the same length")
         if len(self.selected_cols) != len(self.new_cols):
             raise ValueError("selected_cols and new_cols must have the same length")
+        # No-crossing: sorting old positions ascending must leave new positions
+        # strictly ascending. Two RF tones swapping past each other (or merging
+        # to the same frequency) would heat the atoms.
+        for old, new, axis in (
+            (self.selected_rows, self.new_rows, "rows"),
+            (self.selected_cols, self.new_cols, "cols"),
+        ):
+            new_sorted_by_old = [n for _, n in sorted(zip(old, new))]
+            for a, b in zip(new_sorted_by_old, new_sorted_by_old[1:]):
+                if a >= b:
+                    raise ValueError(
+                        f"AOD {axis} would cross or merge: "
+                        f"{list(old)} -> {list(new)}"
+                    )
 
     def _affected(self, ensemble: AtomEnsemble):
         """Yield (atom_id, old_site, new_site) for atoms hit by the lattice op."""
@@ -106,7 +114,7 @@ class AODStep(Step):
 
     def _shared_duration(self, ensemble: AtomEnsemble) -> float:
         """Duration of the AOD op = bang-bang time of the longest atom move."""
-        a = grid_accel_from_phys(PHYS_A_MAX_AOD, ensemble.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         max_L = 0.0
         for _, (i, j), (ni, nj) in self._affected(ensemble):
             max_L = max(max_L, math.hypot(ni - i, nj - j))
@@ -170,7 +178,7 @@ class RIPAStep(Step):
         current = self._current_pos(ensemble)
         if current == tuple(self.target):
             return
-        a = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         seg = make_const_acc_segment(
             current, tuple(self.target), self.start_time, accel=a, channel=self.channel
         )
@@ -181,5 +189,5 @@ class RIPAStep(Step):
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         L = math.hypot(di, dj)
-        a = grid_accel_from_phys(PHYS_A_MAX_RIPA, ensemble.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         return self.start_time + bang_bang_duration(L, a)

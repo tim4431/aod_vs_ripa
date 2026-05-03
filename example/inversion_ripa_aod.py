@@ -42,7 +42,7 @@ from src.movement import AODStep
 from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.base import SyncScheduler
 from src.scheduler.ccbs_c import RIPACCBSWindowedScheduler
-from src.scheduler.ripa_pebroute import RIPAPebRouteScheduler
+from src.scheduler.heuristic.ripa_pebroute import RIPAPebRouteScheduler
 from src.visualization import render_animation
 
 N = 24

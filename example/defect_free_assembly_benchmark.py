@@ -28,9 +28,9 @@ from src.routing import (
     random_sample_sites,
     storage_subgrid,
 )
-from src.scheduler.aod_sqrt_time import SqrtTimeAODScheduler
+from src.scheduler.sqrt_time.aod_sqrt_time import SqrtTimeAODScheduler
 from src.scheduler.tetris import AODTetrisScheduler
-from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
+from src.scheduler.heuristic.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.visualization import render_animation
 
 N = 10

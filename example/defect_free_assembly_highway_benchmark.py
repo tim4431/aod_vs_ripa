@@ -28,9 +28,9 @@ from src.routing import (
     storage_subgrid,
 )
 from src.scheduler.ccbs_c import RIPACCBSCScheduler
-from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
-from src.scheduler.ripa_pebble import RIPAPebbleScheduler
-from src.scheduler.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
+from src.scheduler.heuristic.ripa_naive_sync import RIPANaiveSyncScheduler
+from src.scheduler.heuristic.ripa_pebble import RIPAPebbleScheduler
+from src.scheduler.heuristic.ripa_pebble_adv import UnlabeledRIPAPebbleAdvScheduler
 from src.visualization import render_animation
 
 N = 20

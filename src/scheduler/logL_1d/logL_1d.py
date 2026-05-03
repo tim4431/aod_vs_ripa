@@ -1,34 +1,30 @@
-def plan_aod_rearrangement(
+"""
+1D log(L)-depth AOD rearrangement planner.
+
+Adapted from Wang et al., Nature Physics (2024),
+https://www.nature.com/articles/s41567-024-02479-z.
+
+Note: the pseudocode given in that paper does not actually work as
+written. This is a corrected re-implementation of the divide-and-conquer
+scheme.
+"""
+
+
+def aod_logL_1d_rearrangement(
     sites: list[int],
     src: list[int],
     order: list[int],
 ) -> list[tuple[list[int], list[int]]]:
     """
-    Return only raw AOD-native moves.
+    Return raw AOD-native moves (no atom labels in output).
 
-    sites:
-        All available integer trap sites.
+    sites:  all available integer trap sites.
+    src:    initial occupied atom positions.
+    order:  desired final left-to-right order, relative to the initial
+            left-to-right order. E.g. src=[0,1,2,3,4,5], order=[5,4,3,2,1,0]
+            reverses the initial ordering.
 
-    src:
-        Initial occupied atom positions.
-
-    order:
-        Desired final left-to-right order, relative to the initial
-        left-to-right order.
-
-        Example:
-            src = [0, 1, 2, 3, 4, 5]
-            order = [5, 4, 3, 2, 1, 0]
-
-        means reverse the initial ordering.
-
-    Output:
-        moves = [
-            (from_sites, to_sites),
-            ...
-        ]
-
-    No atom labels are stored in the output.
+    Output: moves = [(from_sites, to_sites), ...]
     """
     sites = sorted(sites)
     src = sorted(src)
@@ -36,195 +32,86 @@ def plan_aod_rearrangement(
 
     if len(set(sites)) != len(sites):
         raise ValueError("sites contains duplicates.")
-
     if len(set(src)) != len(src):
         raise ValueError("src contains duplicates.")
-
-    if not set(src).issubset(set(sites)):
+    if not set(src).issubset(sites):
         raise ValueError("src must be a subset of sites.")
-
     if sorted(order) != list(range(n)):
         raise ValueError(f"order must be a permutation of 0..{n - 1}.")
+    if len(sites) < (3*n)//2:
+        raise ValueError(f"Need at least {(3*n)//2} sites for {n} atoms.")
 
-    # Hard-coded trap requirement:
-    # N atoms + floor(N/2) empty buffer traps.
-    min_sites = n + n // 2
-
-    if len(sites) < min_sites:
-        raise ValueError(f"Need at least {min_sites} sites for {n} atoms.")
-
-    # Internal IDs only. ID i means the i-th atom in the initial ordering.
-    # These IDs are NOT returned in the move program.
+    # Internal IDs only: ID i means the i-th atom in the initial ordering.
     pos = {i: src[i] for i in range(n)}
-
     moves: list[tuple[list[int], list[int]]] = []
 
     def add_move(ids: list[int], dst: list[int]) -> None:
-        """
-        Add one AOD-native move.
-
-        Internally, ids are only used to know which occupied sites are moved.
-        The stored output is only (from_sites, to_sites).
-        """
         if not ids:
             return
-
         frm = [pos[i] for i in ids]
-
-        if frm != sorted(frm):
-            raise RuntimeError(
-                f"Selected atoms are not left-to-right: ids={ids}, sites={frm}"
-            )
-
-        if dst != sorted(dst):
-            raise RuntimeError(f"Target sites are not left-to-right: {dst}")
-
-        unmoved_sites = {
-            p for i, p in pos.items()
-            if i not in ids
-        }
-
-        if any(t in unmoved_sites for t in dst):
-            raise RuntimeError(
-                f"Move collides with unmoved atoms: {frm} -> {dst}"
-            )
-
         if frm == dst:
             return
-
         moves.append((frm[:], dst[:]))
-
         for i, t in zip(ids, dst):
             pos[i] = t
 
-    # ------------------------------------------------------------
-    # Initial normalization:
-    # move all atoms to the rightmost N traps.
-    # This creates the left buffer.
-    # ------------------------------------------------------------
+    # Normalize: pack all atoms into the rightmost N traps to create a left buffer.
     ids0 = list(range(n))
     add_move(ids0, sites[-n:])
 
-    # A block is:
-    #
-    #     (current_ids, target_ids, workspace_sites)
-    #
-    # current_ids are in their current left-to-right order.
-    # target_ids are their desired final left-to-right order.
-    blocks = [
-        (ids0, list(order), sites)
-    ]
+    # A block is (current_ids in current L-R order,
+    #             target_ids in final L-R order,
+    #             workspace_sites).
+    blocks = [(ids0, list(order), sites)]
 
     while any(len(ids) > 1 for ids, _, _ in blocks):
+        # Layer 1: move final-left-half atoms into the left buffer.
         split_blocks = []
-
-        # ========================================================
-        # Layer 1:
-        # Move final-left-half atoms into the left buffer.
-        # ========================================================
-        layer_ids = []
-        layer_dst = []
-
+        layer_ids: list[int] = []
+        layer_dst: list[int] = []
         for ids, target, workspace in blocks:
             m = len(ids)
-
             if m <= 1:
                 split_blocks.append((ids, target, workspace, None))
                 continue
-
             m_left = m // 2
-
-            rank = {
-                i: r
-                for r, i in enumerate(target)
-            }
-
-            left_ids = [
-                i for i in ids
-                if rank[i] < m_left
-            ]
-
-            right_ids = [
-                i for i in ids
-                if rank[i] >= m_left
-            ]
-
+            rank = {i: r for r, i in enumerate(target)}
+            left_ids = [i for i in ids if rank[i] < m_left]
+            right_ids = [i for i in ids if rank[i] >= m_left]
             layer_ids += left_ids
             layer_dst += workspace[:m_left]
-
-            split_blocks.append(
-                (ids, target, workspace, (left_ids, right_ids))
-            )
-
+            split_blocks.append((ids, target, workspace, (left_ids, right_ids)))
         add_move(layer_ids, layer_dst)
 
-        # ========================================================
-        # Layer 2:
-        # Compact both halves into recursive workspaces.
-        # ========================================================
+        # Layer 2: compact each half into the right end of its sub-workspace.
         next_blocks = []
-
         layer_ids = []
         layer_dst = []
-
         for ids, target, workspace, split in split_blocks:
             if split is None:
                 next_blocks.append((ids, target, workspace))
                 continue
-
             left_ids, right_ids = split
-
-            n_left = len(left_ids)
-            n_right = len(right_ids)
-
-            # Hard-coded child workspace sizes:
-            # n + floor(n/2)
-            left_size = n_left + n_left // 2
-            right_size = n_right + n_right // 2
-
+            n_left, n_right = len(left_ids), len(right_ids)
+            left_size = (3* n_left) // 2
+            right_size = (3* n_right) // 2
             left_workspace = workspace[:left_size]
-            right_workspace = workspace[
-                left_size:
-                left_size + right_size
-            ]
-
-            left_dst = left_workspace[-n_left:]
-            right_dst = right_workspace[-n_right:]
-
+            right_workspace = workspace[left_size:left_size + right_size]
             layer_ids += left_ids + right_ids
-            layer_dst += left_dst + right_dst
-
-            next_blocks.append(
-                (
-                    left_ids,
-                    target[:n_left],
-                    left_workspace,
-                )
-            )
-
-            next_blocks.append(
-                (
-                    right_ids,
-                    target[n_left:],
-                    right_workspace,
-                )
-            )
-
+            layer_dst += left_workspace[-n_left:] + right_workspace[-n_right:]
+            next_blocks.append((left_ids, target[:n_left], left_workspace))
+            next_blocks.append((right_ids, target[n_left:], right_workspace))
         add_move(layer_ids, layer_dst)
 
         blocks = next_blocks
 
-    final_ids = [
-        i for i, _ in sorted(pos.items(), key=lambda item: item[1])
-    ]
-
+    final_ids = [i for i, _ in sorted(pos.items(), key=lambda kv: kv[1])]
     assert final_ids == list(order), (final_ids, order)
 
     return moves
 
 
 def apply_move_history(
-    sites: list[int],
     src: list[int],
     moves: list[tuple[list[int], list[int]]],
     labels: list[int] | None = None,
@@ -232,91 +119,23 @@ def apply_move_history(
     """
     Replay raw moves and return the atom configuration after every step.
 
-    labels:
-        Optional atom labels used only for display.
-
-        If labels is None, atoms are labeled 0, 1, ..., N-1 by initial order.
-
-    Output:
-        history[k] is a dictionary:
-
-            site -> atom_label
-
-        after step k.
+    history[k] is a {site -> atom_label} dict after step k. If labels is None,
+    atoms are labeled 0..N-1 by initial order.
     """
-    sites = sorted(sites)
     src = sorted(src)
-    n = len(src)
-
     if labels is None:
-        labels = list(range(n))
-
-    if len(labels) != n:
+        labels = list(range(len(src)))
+    if len(labels) != len(src):
         raise ValueError("labels must have the same length as src.")
 
-    state = {
-        site: label
-        for site, label in zip(src, labels)
-    }
-
+    state = dict(zip(src, labels))
     history = [state.copy()]
-
     for frm, dst in moves:
-        if frm != sorted(frm):
-            raise ValueError(f"Move source sites are not ordered: {frm}")
-
-        if dst != sorted(dst):
-            raise ValueError(f"Move target sites are not ordered: {dst}")
-
-        if len(frm) != len(dst):
-            raise ValueError(f"Move length mismatch: {frm} -> {dst}")
-
-        if any(site not in state for site in frm):
-            raise ValueError(f"Trying to move from an empty site: {frm}")
-
-        carried_atoms = [
-            state[site]
-            for site in frm
-        ]
-
-        for site in frm:
-            del state[site]
-
-        if any(site in state for site in dst):
-            raise ValueError(f"Move collides with unmoved atoms: {dst}")
-
-        for site, atom in zip(dst, carried_atoms):
+        carried = [state.pop(site) for site in frm]
+        for site, atom in zip(dst, carried):
             state[site] = atom
-
         history.append(state.copy())
-
     return history
-
-
-def draw_state(state: dict[int, int], sites: list[int]) -> str:
-    width = max(
-        1,
-        max((len(str(atom)) for atom in state.values()), default=1),
-    )
-
-    return " ".join(
-        f"{str(state[site]) if site in state else '.':>{width}}"
-        for site in sorted(sites)
-    )
-
-
-def print_moves(moves: list[tuple[list[int], list[int]]]) -> None:
-    for step, move in enumerate(moves):
-        frm, dst = move
-        print(f"{step:02d}: {frm} -> {dst}")
-
-
-def print_history(
-    history: list[dict[int, int]],
-    sites: list[int],
-) -> None:
-    for step, state in enumerate(history):
-        print(f"{step:02d}: {draw_state(state, sites)}")
 
 
 def run_test(
@@ -330,31 +149,27 @@ def run_test(
     print(name)
     print("=" * 72)
 
-    moves = plan_aod_rearrangement(sites, src, order)
-
+    moves = aod_logL_1d_rearrangement(sites, src, order)
     print("Raw move program:")
-    print_moves(moves)
+    for step, (frm, dst) in enumerate(moves):
+        print(f"{step:02d}: {frm} -> {dst}")
 
-    print()
-    print("Interpreted configurations:")
-    history = apply_move_history(sites, src, moves, labels=labels)
-    print_history(history, sites)
-
-    final_state = history[-1]
-    final_labels = [
-        final_state[site]
-        for site in sorted(final_state)
-    ]
-
+    history = apply_move_history(src, moves, labels=labels)
+    width = max(
+        (len(str(a)) for state in history for a in state.values()),
+        default=1,
+    )
+    print("\nInterpreted configurations:")
+    for step, state in enumerate(history):
+        row = " ".join(
+            f"{str(state[s]) if s in state else '.':>{width}}"
+            for s in sorted(sites)
+        )
+        print(f"{step:02d}: {row}")
     print()
 
 
 if __name__ == "__main__":
-    # ------------------------------------------------------------
-    # Example 1:
-    # Six atoms initially occupying sites 0..5.
-    # Reverse the initial order.
-    # ------------------------------------------------------------
     run_test(
         name="Example 1: reverse six atoms",
         sites=list(range(9)),
@@ -362,11 +177,6 @@ if __name__ == "__main__":
         order=[5, 4, 3, 2, 1, 0],
     )
 
-    # ------------------------------------------------------------
-    # Example 2:
-    # Six atoms start at sparse integer positions.
-    # Reverse their initial left-to-right order.
-    # ------------------------------------------------------------
     run_test(
         name="Example 2: sparse initial positions, reverse",
         sites=list(range(12)),
@@ -374,31 +184,13 @@ if __name__ == "__main__":
         order=[5, 4, 3, 2, 1, 0],
     )
 
-    # ------------------------------------------------------------
-    # Example 3:
-    # Physical labels initially appear as:
-    #
-    #     3 0 5 1 4 2
-    #
-    # We want:
-    #
-    #     0 1 2 3 4 5
-    #
-    # The planner does not know physical labels.
-    # It only sees the desired order relative to initial indices.
-    # ------------------------------------------------------------
-    initial_physical_labels = [3, 0, 5, 1, 4, 2]
-    desired_physical_labels = [0, 1, 2, 3, 4, 5]
-
-    order = [
-        initial_physical_labels.index(label)
-        for label in desired_physical_labels
-    ]
-
+    # Physical labels appear as 3 0 5 1 4 2; we want 0 1 2 3 4 5.
+    initial = [3, 0, 5, 1, 4, 2]
+    desired = [0, 1, 2, 3, 4, 5]
     run_test(
         name="Example 3: random physical order to sorted physical order",
         sites=list(range(9)),
         src=[0, 1, 2, 3, 4, 5],
-        order=order,
-        labels=initial_physical_labels,
+        order=[initial.index(label) for label in desired],
+        labels=initial,
     )

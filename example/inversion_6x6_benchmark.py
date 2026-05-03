@@ -28,11 +28,11 @@ if str(ROOT) not in sys.path:
 from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
 from src.routing import RoutingRequest, centered_storage_square
-from src.scheduler.ripa_naive_sync import RIPANaiveSyncScheduler
-from src.scheduler.ripa_pebble import RIPAPebbleScheduler
-from src.scheduler.ripa_pebble_adv import RIPAPebbleAdvScheduler
-from src.scheduler.ripa_pebroute import RIPAPebRouteScheduler
-from src.scheduler.ripa_stochastic_search import RIPASearchScheduler
+from src.scheduler.heuristic.ripa_naive_sync import RIPANaiveSyncScheduler
+from src.scheduler.heuristic.ripa_pebble import RIPAPebbleScheduler
+from src.scheduler.heuristic.ripa_pebble_adv import RIPAPebbleAdvScheduler
+from src.scheduler.heuristic.ripa_pebroute import RIPAPebRouteScheduler
+from src.scheduler.heuristic.ripa_stochastic_search import RIPASearchScheduler
 from src.visualization import render_animation
 
 N = 24

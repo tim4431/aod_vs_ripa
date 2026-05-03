@@ -28,11 +28,11 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Iterable, Literal
 
-from ..atom_trajectory import CollisionError
-from ..movement import PHYS_A_MAX_RIPA, RIPAStep, grid_accel_from_phys
-from ..routing import Site
-from ..segments import bang_bang_duration
-from .base import AsyncScheduler, LabeledScheduler, UnlabeledScheduler
+from ...atom_trajectory import CollisionError
+from ...movement import PHYS_A_MAX, RIPAStep, grid_accel_from_phys
+from ...routing import Site
+from ...segments import bang_bang_duration
+from ..base import AsyncScheduler, LabeledScheduler, UnlabeledScheduler
 
 Channel = Literal["row", "col"]
 
@@ -456,7 +456,7 @@ class PebbleWorkspace:
         return self._move_duration(1.0)
 
     def _move_duration(self, distance: float) -> float:
-        a = grid_accel_from_phys(PHYS_A_MAX_RIPA, self.request.grid.d)
+        a = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
         return bang_bang_duration(float(distance), a)
 
     @staticmethod
