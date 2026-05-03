@@ -22,10 +22,10 @@ The RIPA scheduler (left) used here is a simple heuristic scheduler [`RIPAPebble
 
 ![defect free assembly](demo/defect_free_assembly_benchmark.gif)
 
-The RIPA completes the assembly within `497 us`, while both aod compiles to `~2ms` operation times.
+The RIPA completes the assembly within `497 us`, while both aod schedulers compiles to `~2ms` operation times.
 
 
-## (Labeled)Pair-wise rearrangment
+## (Labeled) Pair-wise atom routing
 
 When routing atoms encoded with quantum information, they are no longer treated as identical, and the routing is a labeled, pair-wise rearrangement problem.
 
@@ -37,13 +37,9 @@ Here we represent an inversion operation of a `1x6` atom array. We can see the R
 
 The performance boost (`2159 us` to `451 us`) is huge.
 
-With a 6x6 atom array, where AOD arranger(left) gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. Assume we have the same throughput (1 channel per adjacent row/column within atom array), the RIPA scheduler (right) still takes less time due to its flexible routing capability.
+With a 6x6 atom array, where AOD arranger(left) gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. In [inversion 6x6 benchmark](demo/inversion_6x6_ripa_aod.gif), we can see the RIPA scheduler (right) still takes less time due to its flexible routing capability.
 
-![inversion 6x6 benchmark](demo/inversion_6x6_ripa_aod.gif)
-
-It is interesting to show that AOD has a log(N) arbitrary re-arrangement algorithm, see [constant_overhead_paper](https://www.nature.com/articles/s41567-024-02479-z).
--  However when `N=6`, this method also requires 6 steps to move, see [algorithm here](src/scheduler/logL_1d/logL_1d.py), so we didn't demonstrate it here.
-- Moreover, the RIPA can perform the same movement that AOD does, with a potential speedup due to its asynchronous and parallel nature.
+Note that AOD has a `log(N)` arbitrary re-arrangement algorith (and so does RIPA!), see [constant_overhead_paper](https://www.nature.com/articles/s41567-024-02479-z). However when `N=6`, this method also requires 6 steps to move, see [algorithm here](src/scheduler/logL_1d/logL_1d.py), so we didn't demonstrate it here.
 
 **Coding rotation**
 

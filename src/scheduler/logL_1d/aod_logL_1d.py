@@ -1,8 +1,15 @@
 """log(L)-depth AOD scheduler for 1D rearrangement on a single row/column.
 
 Wraps `aod_logL_1d_rearrangement` (in `logL_1d.py`) for the
-`scheduler.base` Scheduler API. Each planner move maps directly to one
-synchronous AODStep.
+`scheduler.base` Scheduler API. The planner emits subset moves that
+treat atoms as if they could pass straight through stationary neighbours
+on the same line; in this simulation that triggers the physical
+collision check. To stay collision-safe each planner move is realised as
+three AODSteps: lift the moving subset onto an adjacent free row/col,
+slide it along the motion axis (now obstruction-free), then lower it
+back. A final consolidation AODStep moves the planner's natural
+deposition pattern onto sorted(dst) (no lift needed: every atom moves
+together with no stationary obstacles).
 """
 
 from __future__ import annotations
@@ -17,21 +24,31 @@ from .logL_1d import aod_logL_1d_rearrangement
 Axis = Literal["row", "col"]
 
 
+def _natural_pattern(n: int) -> list[int]:
+    """Workspace indices where the planner deposits the n atoms.
+
+    Mirrors the planner's recursive split: each subgroup of size m ends
+    at the right edge of its sub-workspace of size 3*m//2.
+    """
+    if n <= 0:
+        return []
+    if n == 1:
+        return [0]
+    n_left = n // 2
+    n_right = n - n_left
+    ws_left_size = 3 * n_left // 2
+    return _natural_pattern(n_left) + [
+        p + ws_left_size for p in _natural_pattern(n_right)
+    ]
+
+
 @dataclass
 class AODLogL1DScheduler(SyncScheduler):
     """log(L)-depth AOD scheduler for 1D rearrangement.
 
-    The underlying planner packs atoms toward the leftmost end of its
-    workspace, so the request must satisfy:
-
-      - every src and dst site lies on the same grid row, or every src
-        and dst site lies on the same grid column;
-      - sorted(dst) forms the leftmost N positions of the workspace, i.e.
-        every src position not also in dst must be strictly greater than
-        max(dst). Atoms come in from the right and pack into dst.
-
-    Works for both labeled (atom k -> dst[k]) and unlabeled (set -> set)
-    requests.
+    Requires every src and dst site to lie on one shared row, or every
+    src and dst site to lie on one shared column. Works for both labeled
+    (atom k -> dst[k]) and unlabeled (set -> set) requests.
     """
 
     def _plan(self) -> None:
@@ -40,35 +57,46 @@ class AODLogL1DScheduler(SyncScheduler):
             return
 
         axis, fixed, src_1d, dst_1d = self._project_to_1d()
-        sites = self._build_workspace(n, src_1d, dst_1d)
+        workspace = self._build_workspace(n, src_1d)
         order = self._compute_order(src_1d, dst_1d)
+        lift_to = self._lift_index(fixed)
 
-        for frm, to in aod_logL_1d_rearrangement(sites, src_1d, order):
-            self.append_step(self._aod_step(axis, fixed, frm, to))
+        for frm, to in aod_logL_1d_rearrangement(workspace, src_1d, order):
+            self._append_aod(axis, fixed, lift_to, frm, frm)
+            self._append_aod(axis, lift_to, lift_to, frm, to)
+            self._append_aod(axis, lift_to, fixed, to, to)
 
-    def _aod_step(
+        nat_positions = [workspace[i] for i in _natural_pattern(n)]
+        sorted_dst = sorted(dst_1d)
+        if nat_positions != sorted_dst:
+            self._append_aod(axis, fixed, fixed, nat_positions, sorted_dst)
+
+    def _append_aod(
         self,
         axis: Axis,
-        fixed: int,
+        old_fixed: int,
+        new_fixed: int,
         frm: list[int],
         to: list[int],
-    ) -> AODStep:
+    ) -> None:
         start_time = self.sequence.next_start_time()
         if axis == "row":
-            return AODStep(
+            step = AODStep(
                 start_time=start_time,
-                selected_rows=(fixed,),
+                selected_rows=(old_fixed,),
                 selected_cols=tuple(frm),
-                new_rows=(fixed,),
+                new_rows=(new_fixed,),
                 new_cols=tuple(to),
             )
-        return AODStep(
-            start_time=start_time,
-            selected_rows=tuple(frm),
-            selected_cols=(fixed,),
-            new_rows=tuple(to),
-            new_cols=(fixed,),
-        )
+        else:
+            step = AODStep(
+                start_time=start_time,
+                selected_rows=tuple(frm),
+                selected_cols=(old_fixed,),
+                new_rows=tuple(to),
+                new_cols=(new_fixed,),
+            )
+        self.append_step(step)
 
     def _project_to_1d(self) -> tuple[Axis, int, list[int], list[int]]:
         src = self.request.src
@@ -86,33 +114,39 @@ class AODLogL1DScheduler(SyncScheduler):
             "or single column"
         )
 
-    def _build_workspace(
-        self,
-        n: int,
-        src_1d: list[int],
-        dst_1d: list[int],
-    ) -> list[int]:
-        sorted_dst = sorted(dst_1d)
-        max_dst = sorted_dst[-1]
-        dst_set = set(sorted_dst)
-        for s in src_1d:
-            if s <= max_dst and s not in dst_set:
-                raise ValueError(
-                    f"src position {s} is inside the dst range but is not a "
-                    "dst; the logL_1d planner only packs atoms in from the right"
-                )
-        sites = sorted(dst_set | {s for s in src_1d if s > max_dst})
+    def _build_workspace(self, n: int, src_1d: list[int]) -> list[int]:
+        """Sorted workspace of size 3n//2 containing src plus filler sites."""
         N = self.request.grid.N
-        next_pos = sites[-1] + 1
-        while len(sites) < (3 * n) // 2:
-            if next_pos >= N:
+        needed = (3 * n) // 2
+        sites = list(src_1d)
+        next_right = max(sites) + 1
+        next_left = min(sites) - 1
+        while len(sites) < needed:
+            if next_right < N:
+                sites.append(next_right)
+                next_right += 1
+            elif next_left >= 0:
+                sites.append(next_left)
+                next_left -= 1
+            else:
                 raise ValueError(
-                    f"need {(3 * n) // 2} workspace positions but the grid "
-                    f"extent along the moving axis is {N}"
+                    f"need {needed} workspace positions but the grid extent "
+                    f"along the moving axis is {N}"
                 )
-            sites.append(next_pos)
-            next_pos += 1
-        return sites
+        return sorted(sites)
+
+    def _lift_index(self, fixed: int) -> int:
+        """An adjacent row/col used as the lifted slide lane during planner
+        moves; must lie inside the grid."""
+        N = self.request.grid.N
+        if fixed + 1 < N:
+            return fixed + 1
+        if fixed - 1 >= 0:
+            return fixed - 1
+        raise ValueError(
+            "AODLogL1DScheduler needs at least one adjacent row/col to lift "
+            f"atoms into; grid extent {N} too small for fixed index {fixed}"
+        )
 
     def _compute_order(self, src_1d: list[int], dst_1d: list[int]) -> list[int]:
         n = len(src_1d)
