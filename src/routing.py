@@ -85,6 +85,7 @@ class RoutingRequest:
     src: Sequence[Site]
     dst: Sequence[Site]
     labeled: bool = False
+    available_sites: Optional[Sequence[Site]] = None
 
     def __post_init__(self):
         self.src = [tuple(p) for p in self.src]
@@ -104,6 +105,22 @@ class RoutingRequest:
             for i, j in lst:
                 if not (0 <= i < N and 0 <= j < N):
                     raise ValueError(f"{label} site {(i, j)} is outside a {N}x{N} grid")
+
+        if self.available_sites is not None:
+            self.available_sites = [tuple(p) for p in self.available_sites]
+            if len(set(self.available_sites)) != len(self.available_sites):
+                raise ValueError("available_sites has duplicate sites")
+            for i, j in self.available_sites:
+                if not (0 <= i < N and 0 <= j < N):
+                    raise ValueError(
+                        f"available_site {(i, j)} is outside a {N}x{N} grid"
+                    )
+            avail = set(self.available_sites)
+            missing_src = [s for s in self.src if s not in avail]
+            if missing_src:
+                raise ValueError(
+                    f"src sites not in available_sites: {missing_src}"
+                )
 
     @property
     def initial(self) -> AtomConfig:

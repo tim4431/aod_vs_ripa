@@ -43,6 +43,7 @@ from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.base import SyncScheduler
 from src.scheduler.ccbs_c import RIPACCBSWindowedScheduler
 from src.scheduler.heuristic.ripa_pebroute import RIPAPebRouteScheduler
+from src.scheduler.logL_1d.aod_logL_1d import AODLogL1DPerLineScheduler
 from src.visualization import render_animation
 
 N = 24
@@ -119,18 +120,20 @@ class ManualAODXInversionScheduler(SyncScheduler):
 
 # Dict order = panel order. Keys also become panel labels.
 SCHEDULERS_6X6 = {
-    "AOD manual": ManualAODXInversionScheduler,
     "RIPA_ccbs": lambda req: RIPACCBSWindowedScheduler(
         req,
         **CCBS_KWARGS,
         grouped_time_limit=15.0,
         grouped_max_high_level_nodes=100_000,
     ),
+    "AOD manual": ManualAODXInversionScheduler,
+    "AOD logL_1d": AODLogL1DPerLineScheduler,
 }
 
 SCHEDULERS_1X6 = {
-    "AOD manual": ManualAODXInversionScheduler,
     "RIPA_pebroute": RIPAPebRouteScheduler,
+    "AOD manual": ManualAODXInversionScheduler,
+    "AOD logL_1d": AODLogL1DPerLineScheduler,
 }
 
 

@@ -31,15 +31,18 @@ When routing atoms encoded with quantum information, they are no longer treated 
 
 **Atom array inversion**
 
-Here we represent an inversion operation of a `1x6` atom array. We can see the RIPA arranger (right) can perform the inversion in a 1-step fashion, while the AOD arranger (left) needs to perform this in multiple steps. Moreover, RIPA does not require a hand-off between AOD and SLM traps which could potentially introduce atom loss.
+Here we represent an inversion operation of a `1x6` atom array. We can see the RIPA arranger (left) can perform the inversion in a 1-step fashion, while the AOD arranger (middle, right) needs to perform this in multiple steps. Moreover, RIPA does not require a hand-off between AOD and SLM traps which could potentially introduce atom loss.
 
 ![inversion 1x6 benchmark](demo/inversion_1x6_ripa_aod.gif)
 
 The performance boost (`2159 us` to `451 us`) is huge.
 
-With a 6x6 atom array, where AOD arranger(left) gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. In [inversion 6x6 benchmark](demo/inversion_6x6_ripa_aod.gif), we can see the RIPA scheduler (right) still takes less time due to its flexible routing capability.
+Note: for AOD it has a `log(N)` arbitrary re-arrangement algorith (and so does RIPA!), as demonstrated in the middle panel. See the original paper [constant_overhead_paper](https://www.nature.com/articles/s41567-024-02479-z) and the code [algorithm here](src/scheduler/logL_1d/logL_1d.py).
 
-Note that AOD has a `log(N)` arbitrary re-arrangement algorith (and so does RIPA!), see [constant_overhead_paper](https://www.nature.com/articles/s41567-024-02479-z). However when `N=6`, this method also requires 6 steps to move, see [algorithm here](src/scheduler/logL_1d/logL_1d.py), so we didn't demonstrate it here.
+With a 6x6 atom array, where AOD arranger (middle, right) gains more parallelism, now the total time cost to rearrange is limited by the maximum throughput. We can see the RIPA scheduler (left) still takes less time due to its flexible routing capability.
+
+![inversion 6x6 benchmark](demo/inversion_6x6_ripa_aod.gif)
+
 
 **Coding rotation**
 
