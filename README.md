@@ -46,6 +46,13 @@ With a 6x6 atom array, where AOD arranger (middle, right) gains more parallelism
 
 **Coding rotation**
 
+The RIPA shows its power in more complex, 2d routing problems. For example, a logical hardmard gate for a surface code includes a transversal hardmard for each atoms, followed by a patch rotation that exchanges the rough and smooth boundaries.
+
+The patch rotation can be implemented with an extra set of 2D-AOD ([Zihan Chen, et al.](https://arxiv.org/pdf/2412.01391)), diagonally
+aligned, together a horizontally aligned set, to implement the patch rotation. With RIPA-native movements, we can implement the patch rotation within much faster time scale.
+
+![hardmard patch rotation](demo/hardmard_patch_rotation.gif)
+
 
 ## How does a RIPA transportation work
 

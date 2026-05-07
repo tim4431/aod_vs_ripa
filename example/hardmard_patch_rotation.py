@@ -312,8 +312,8 @@ class ManualRIPAHadamardPatchRotationScheduler(AsyncScheduler):
 
 
 SCHEDULERS = {
+    "RIPA rotation": ManualRIPAHadamardPatchRotationScheduler,
     "AOD H rotation": AODHadamardPatchRotationScheduler,
-    "RIPA ring manual": ManualRIPAHadamardPatchRotationScheduler,
 }
 
 
@@ -370,7 +370,7 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=5e3,
+        time_dilation=2e3,
         hold_seconds=1.5,
         atom_colors=patch_rotation_colors(src),
         show_routing_on_start=True,
