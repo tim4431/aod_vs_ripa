@@ -1,8 +1,8 @@
 """Per-segment motion profiles, with absolute timing.
 
-A `Trajectory` is one *timed* segment of a single atom's life. Atoms usually
-rest at integer sites between segments; AOD detours may temporarily rest on
-half-grid lift lanes before lowering back to storage. Segments carry their
+A `Trajectory` is one *timed* segment of a single atom's life. Resting
+positions are float-coordinate trap positions; RIPA callers separately
+constrain their hand-off points to integer grid sites. Segments carry their
 absolute `start_time` so the global timeline of a Sequence can be reconstructed
 by looking at any atom's trajectory list.
 
@@ -27,8 +27,8 @@ Axis = Literal["x", "y"]  # x == i-coordinate, y == j-coordinate
 class Segment:
     start_time: float  # absolute global time [s]
     duration: float  # length of this segment [s]
-    start_pos: tuple[float, float]  # integer site, or temporary half-grid lane
-    end_pos: tuple[float, float]  # integer site, or temporary half-grid lane
+    start_pos: tuple[float, float]  # resting trap position in grid units
+    end_pos: tuple[float, float]  # resting trap position in grid units
     fn: TrajFn  # local-time -> (i, j) float
     channel: Optional[Channel] = None  # which addressing channel drove the move
     profile: Optional[Profile] = None  # local-time -> path fraction, when known
@@ -218,7 +218,7 @@ def make_hold(
 
 
 def _clean_coord(value: float) -> float:
-    """Keep integer coordinates as ints, but preserve half-grid lift lanes."""
+    """Normalize near-integers while preserving genuine float coordinates."""
     x = float(value)
     rounded = round(x)
     if abs(x - rounded) <= 1e-9:

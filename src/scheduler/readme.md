@@ -4,9 +4,9 @@ By scheduler i mean it can handle a `RoutingRequest`. The scheduler automaticall
 **Types of schedulers** (see [base.py](base.py))
 - **Sync vs async**: `SyncScheduler` advances in clocked cycles where same-cycle steps share a start time; `AsyncScheduler` lets each step pick its own start time independently.
 - **Labeled vs unlabeled**: `LabeledScheduler` only accepts requests where atom `k` must reach `dst[k]`; `UnlabeledScheduler` only accepts set→set requests where atoms are interchangeable. The two axes are orthogonal — a concrete scheduler can pick any combination via multiple inheritance.
-- **AOD vs RIPA hardware model**: AOD steps map `(row→new_row, col→new_col)` so a whole sub-lattice moves together; RIPA steps move one atom along one channel (`"row"` or `"col"`) at a time.
+- **AOD vs RIPA hardware model**: AOD steps map local crossed-axis coordinates `(axis_1→new_axis_1, axis_2→new_axis_2)` so a whole sub-lattice moves together; RIPA steps move one atom along one channel (`"row"` or `"col"`) at a time.
 
-`AODStep` is synchronous: atoms in `selected_rows × selected_cols` move together and share the longest required duration. `RIPAStep` moves one atom along one channel; asynchronous behavior comes from giving different `RIPAStep`s different `start_time`s. For sync-style RIPA batches, use `Sequence.append_sync_batch(...)`.
+`AODStep` is synchronous: atoms in `selected_axis_1 × selected_axis_2` move together and share the longest required duration. The AOD basis vectors are independent but need not be perpendicular. `RIPAStep` moves one atom along one channel; asynchronous behavior comes from giving different `RIPAStep`s different `start_time`s. For sync-style RIPA batches, use `Sequence.append_sync_batch(...)`.
 
 ## List of schedulers
 

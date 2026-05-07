@@ -4,8 +4,8 @@ A request is fully specified by
 
     (grid, src: list[Site], dst: list[Site], labeled: bool)
 
-where `src` is the list of currently-occupied sites (one per atom) and
-`dst` is the list of target sites (also one per atom; `len(src) ==
+where `src` is the list of currently-occupied positions (one per atom) and
+`dst` is the list of target positions (also one per atom; `len(src) ==
 len(dst)`).
 
 The `labeled` flag selects between the two routing problems:
@@ -28,9 +28,9 @@ from typing import Optional, Sequence
 import random
 import numpy as np
 
-from .atom_config import AtomConfig, Grid
+from .atom_config import AtomConfig, Grid, clean_position, position_key
 
-Site = tuple[int, int]
+Site = tuple[float, float]
 
 
 def stochastically_loaded_sites(N: int, atom_count: int, seed: int) -> list[Site]:
@@ -88,16 +88,16 @@ class RoutingRequest:
     available_sites: Optional[Sequence[Site]] = None
 
     def __post_init__(self):
-        self.src = [tuple(p) for p in self.src]
-        self.dst = [tuple(p) for p in self.dst]
+        self.src = [clean_position(p) for p in self.src]
+        self.dst = [clean_position(p) for p in self.dst]
         if len(self.src) != len(self.dst):
             raise ValueError(
                 f"src ({len(self.src)} sites) and dst ({len(self.dst)} sites) "
                 "must have the same length"
             )
-        if len(set(self.src)) != len(self.src):
+        if len({position_key(p) for p in self.src}) != len(self.src):
             raise ValueError("src has duplicate sites")
-        if len(set(self.dst)) != len(self.dst):
+        if len({position_key(p) for p in self.dst}) != len(self.dst):
             raise ValueError("dst has duplicate sites")
         # Bound check (cheap; catches off-by-one mistakes early).
         N = self.grid.N
@@ -107,16 +107,19 @@ class RoutingRequest:
                     raise ValueError(f"{label} site {(i, j)} is outside a {N}x{N} grid")
 
         if self.available_sites is not None:
-            self.available_sites = [tuple(p) for p in self.available_sites]
-            if len(set(self.available_sites)) != len(self.available_sites):
+            self.available_sites = [clean_position(p) for p in self.available_sites]
+            if (
+                len({position_key(p) for p in self.available_sites})
+                != len(self.available_sites)
+            ):
                 raise ValueError("available_sites has duplicate sites")
             for i, j in self.available_sites:
                 if not (0 <= i < N and 0 <= j < N):
                     raise ValueError(
                         f"available_site {(i, j)} is outside a {N}x{N} grid"
                     )
-            avail = set(self.available_sites)
-            missing_src = [s for s in self.src if s not in avail]
+            avail = {position_key(p) for p in self.available_sites}
+            missing_src = [s for s in self.src if position_key(s) not in avail]
             if missing_src:
                 raise ValueError(
                     f"src sites not in available_sites: {missing_src}"
@@ -125,7 +128,7 @@ class RoutingRequest:
     @property
     def initial(self) -> AtomConfig:
         """Build the initial AtomConfig from `src` (atom_id k = src order)."""
-        return AtomConfig(positions=np.asarray(self.src, dtype=int))
+        return AtomConfig(positions=np.asarray(self.src, dtype=float))
 
     def target_sites(self) -> set[Site]:
         """All target sites (set), regardless of labeled/unlabeled."""

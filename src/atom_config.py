@@ -1,8 +1,8 @@
 """Grid + AtomConfig.
 
-`AtomConfig` is a *resting-state snapshot*: per atom, the integer (i, j)
-site and the `atom_id`. Atoms in motion are not described here — see
-`atom_trajectory.AtomTrajectory` for that.
+`AtomConfig` is a *resting-state snapshot*: per atom, the float-coordinate
+(i, j) position and the `atom_id`. Atoms in motion are not described here —
+see `atom_trajectory.AtomTrajectory` for that.
 
 `AtomConfig` deliberately does *not* carry the `Grid`. The grid is a
 property of the experimental setup, not of any particular snapshot, so
@@ -20,6 +20,35 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+
+POSITION_TOL = 1e-9
+
+
+def clean_coord(value: float) -> float:
+    """Normalize coordinates while preserving genuinely off-grid AOD positions."""
+    x = float(value)
+    rounded = round(x)
+    if abs(x - rounded) <= POSITION_TOL:
+        return float(rounded)
+    return x
+
+
+def clean_position(pos) -> tuple[float, float]:
+    return clean_coord(pos[0]), clean_coord(pos[1])
+
+
+def position_key(pos) -> tuple[int, int]:
+    """Tolerance-aware key for duplicate/occupancy checks."""
+    i, j = clean_position(pos)
+    return (
+        int(round(i / POSITION_TOL)),
+        int(round(j / POSITION_TOL)),
+    )
+
+
+def is_integer_position(pos) -> bool:
+    i, j = clean_position(pos)
+    return abs(i - round(i)) <= POSITION_TOL and abs(j - round(j)) <= POSITION_TOL
 
 
 @dataclass(frozen=True)
@@ -41,24 +70,21 @@ class Grid:
 
 @dataclass
 class AtomConfig:
-    # positions[k] = (i, j) of atom k, integer site. Shape (M, 2).
+    # positions[k] = (i, j) of atom k in grid units. Shape (M, 2).
     positions: np.ndarray
     # atom_ids[k] = identifier of atom k. Shape (M,). Defaults to arange(M).
     atom_ids: Optional[np.ndarray] = None
 
     def __post_init__(self):
-        arr = np.asarray(self.positions).reshape(-1, 2)
-        # Enforce integer sites — this snapshot is a resting state.
-        rounded = np.round(arr).astype(int)
-        if not np.allclose(arr, rounded, atol=1e-9):
-            raise ValueError("AtomConfig positions must be integer grid sites")
-        self.positions = rounded
+        arr = np.asarray(self.positions, dtype=float).reshape(-1, 2)
+        self.positions = np.asarray([clean_position(p) for p in arr], dtype=float)
         # Reject duplicate sites: a site can hold at most one atom.
         seen: set[tuple[int, int]] = set()
         for i, j in self.positions:
-            if (int(i), int(j)) in seen:
-                raise ValueError(f"duplicate atom at site {(int(i), int(j))}")
-            seen.add((int(i), int(j)))
+            key = position_key((i, j))
+            if key in seen:
+                raise ValueError(f"duplicate atom at position {(float(i), float(j))}")
+            seen.add(key)
         # Default atom_ids to 0..M-1 if not provided.
         M = len(self.positions)
         if self.atom_ids is None:
@@ -81,20 +107,20 @@ class AtomConfig:
             atom_ids=self.atom_ids.copy(),
         )
 
-    def occupied_sites(self) -> set[tuple[int, int]]:
-        return {(int(i), int(j)) for i, j in self.positions}
+    def occupied_sites(self) -> set[tuple[float, float]]:
+        return {clean_position((i, j)) for i, j in self.positions}
 
-    def occupancy(self) -> dict[tuple[int, int], int]:
-        """Map site -> atom_id. The two key snapshot views are by site
+    def occupancy(self) -> dict[tuple[float, float], int]:
+        """Map position -> atom_id. The two key snapshot views are by position
         (this method) and by id (`site_of_atom`)."""
         return {
-            (int(i), int(j)): int(aid)
+            clean_position((i, j)): int(aid)
             for (i, j), aid in zip(self.positions, self.atom_ids)
         }
 
-    def site_of_atom(self) -> dict[int, tuple[int, int]]:
-        """Inverse of `occupancy`: atom_id -> site."""
+    def site_of_atom(self) -> dict[int, tuple[float, float]]:
+        """Inverse of `occupancy`: atom_id -> position."""
         return {
-            int(aid): (int(i), int(j))
+            int(aid): clean_position((i, j))
             for (i, j), aid in zip(self.positions, self.atom_ids)
         }

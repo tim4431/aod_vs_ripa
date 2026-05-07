@@ -64,10 +64,10 @@ class AODMoveSpec:
     def to_step(self, start_time: float) -> AODStep:
         return AODStep(
             start_time=start_time,
-            selected_rows=self.old_rows,
-            selected_cols=self.old_cols,
-            new_rows=self.new_rows,
-            new_cols=self.new_cols,
+            selected_axis_1=self.old_rows,
+            selected_axis_2=self.old_cols,
+            new_axis_1=self.new_rows,
+            new_axis_2=self.new_cols,
         )
 
 

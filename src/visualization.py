@@ -778,28 +778,18 @@ def _active_aod_traps_xy(
     """Positions of every active AOD trap, including empty intersections."""
     traps: list[tuple[float, float]] = []
     for step in steps:
-        selected_sums = getattr(step, "selected_sums", None)
-        selected_diffs = getattr(step, "selected_diffs", None)
-        new_sums = getattr(step, "new_sums", None)
-        new_diffs = getattr(step, "new_diffs", None)
-        selected_rows = getattr(step, "selected_rows", None)
-        selected_cols = getattr(step, "selected_cols", None)
-        new_rows = getattr(step, "new_rows", None)
-        new_cols = getattr(step, "new_cols", None)
+        selected_axis_1 = getattr(step, "selected_axis_1", None)
+        selected_axis_2 = getattr(step, "selected_axis_2", None)
+        new_axis_1 = getattr(step, "new_axis_1", None)
+        new_axis_2 = getattr(step, "new_axis_2", None)
         start_time = getattr(step, "start_time", None)
-        has_axis_aod = (
-            selected_rows is not None
-            and selected_cols is not None
-            and new_rows is not None
-            and new_cols is not None
-        )
-        has_diag_aod = (
-            selected_sums is not None
-            and selected_diffs is not None
-            and new_sums is not None
-            and new_diffs is not None
-        )
-        if start_time is None or not (has_axis_aod or has_diag_aod):
+        if (
+            start_time is None
+            or selected_axis_1 is None
+            or selected_axis_2 is None
+            or new_axis_1 is None
+            or new_axis_2 is None
+        ):
             continue
         try:
             end_time = step.end_time(ensemble)
@@ -809,27 +799,25 @@ def _active_aod_traps_xy(
         if duration <= 0 or not (start_time - tol <= t < end_time - tol):
             continue
         u = _bang_bang_fraction(float(t - start_time), duration)
-        if has_axis_aod:
-            rows = [
-                float(old) + u * (float(new) - float(old))
-                for old, new in zip(selected_rows, new_rows)
-            ]
-            cols = [
-                float(old) + u * (float(new) - float(old))
-                for old, new in zip(selected_cols, new_cols)
-            ]
-            traps.extend((i, j) for i in rows for j in cols)
-            continue
-
-        sums = [
+        coords_1 = [
             float(old) + u * (float(new) - float(old))
-            for old, new in zip(selected_sums, new_sums)
+            for old, new in zip(selected_axis_1, new_axis_1)
         ]
-        diffs = [
+        coords_2 = [
             float(old) + u * (float(new) - float(old))
-            for old, new in zip(selected_diffs, new_diffs)
+            for old, new in zip(selected_axis_2, new_axis_2)
         ]
-        traps.extend(((s + d) / 2.0, (s - d) / 2.0) for s in sums for d in diffs)
+        axis_1 = getattr(step, "axis_1", (1.0, 0.0))
+        axis_2 = getattr(step, "axis_2", (0.0, 1.0))
+        origin = getattr(step, "origin", (0.0, 0.0))
+        traps.extend(
+            (
+                origin[0] + coord_1 * axis_1[0] + coord_2 * axis_2[0],
+                origin[1] + coord_1 * axis_1[1] + coord_2 * axis_2[1],
+            )
+            for coord_1 in coords_1
+            for coord_2 in coords_2
+        )
 
     if not traps:
         return np.empty((0, 2), dtype=float)

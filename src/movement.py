@@ -4,14 +4,9 @@ Both step types subclass `Step` and share one effect: they append
 `Trajectory` segments to the relevant `AtomTrajectory`s in an
 `AtomEnsemble`. They differ in how they pick atoms and shape moves:
 
-* `AODStep` — synchronous axis-aligned lattice operation. Defined by selected
-  rows/cols and their new positions; only atoms at the cartesian
-  product (selected_rows x selected_cols) are moved, all sharing one
-  start_time and one duration (set by the longest move).
-* `DiagonalAODStep` — synchronous 45-degree AOD operation. It addresses
-  rotated coordinates `sum = i + j` and `diff = i - j`, so the selected
-  intersections are diagonal lattice lines instead of row/column lines.
-
+* `AODStep` — synchronous outer-product lattice operation in an arbitrary
+  floating-point AOD basis. Only atoms at the selected local-coordinate
+  intersections move, all sharing one start_time and one duration.
 * `RIPAStep` — single-atom move, addressed by `atom_id`. Travels along
   one EOM channel ('row' moves along x with j fixed, 'col' moves along
   y with i fixed). Diagonals must be split into multiple RIPASteps.
@@ -34,6 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Literal
 
+from .atom_config import clean_position, is_integer_position
 from .atom_trajectory import AtomEnsemble
 from .segments import bang_bang_duration, make_const_acc_segment
 
@@ -70,31 +66,56 @@ class Step(ABC):
 
 @dataclass
 class AODStep(Step):
-    """Synchronous AOD lattice op.
+    """Synchronous AOD lattice op with an arbitrary 2D basis.
 
-    The AOD addresses the cartesian product `selected_rows x selected_cols`
-    via one RF tone per row and one per col. Atoms sitting at any of those
-    intersections move together; their (row, col) indices remap to the
-    matching entries in `new_rows`, `new_cols`. Lengths must match.
+    The AOD addresses the cartesian product `selected_axis_1 x selected_axis_2`
+    in local AOD coordinates. Physical grid coordinates are
+
+        origin + axis_1_coord * axis_1 + axis_2_coord * axis_2
+
+    Axis-aligned AODs use the default basis `(1, 0), (0, 1)`. Crossed AODs
+    need only pass independent basis vectors; they do not need to be
+    perpendicular.
     """
 
     start_time: float
-    selected_rows: tuple[int, ...]
-    selected_cols: tuple[int, ...]
-    new_rows: tuple[int, ...]
-    new_cols: tuple[int, ...]
+    selected_axis_1: tuple[float, ...]
+    selected_axis_2: tuple[float, ...]
+    new_axis_1: tuple[float, ...]
+    new_axis_2: tuple[float, ...]
+    axis_1: tuple[float, float] = (1.0, 0.0)
+    axis_2: tuple[float, float] = (0.0, 1.0)
+    origin: tuple[float, float] = (0.0, 0.0)
+    match_tol: float = 1e-9
 
     def __post_init__(self):
-        if len(self.selected_rows) != len(self.new_rows):
-            raise ValueError("selected_rows and new_rows must have the same length")
-        if len(self.selected_cols) != len(self.new_cols):
-            raise ValueError("selected_cols and new_cols must have the same length")
-        # No-crossing: sorting old positions ascending must leave new positions
-        # strictly ascending. Two RF tones swapping past each other (or merging
-        # to the same frequency) would heat the atoms.
+        self.start_time = float(self.start_time)
+        if len(self.selected_axis_1) != len(self.new_axis_1):
+            raise ValueError(
+                "selected_axis_1 and new_axis_1 must have the same length"
+            )
+        if len(self.selected_axis_2) != len(self.new_axis_2):
+            raise ValueError(
+                "selected_axis_2 and new_axis_2 must have the same length"
+            )
+
+        self.selected_axis_1 = tuple(float(x) for x in self.selected_axis_1)
+        self.selected_axis_2 = tuple(float(x) for x in self.selected_axis_2)
+        self.new_axis_1 = tuple(float(x) for x in self.new_axis_1)
+        self.new_axis_2 = tuple(float(x) for x in self.new_axis_2)
+        self.axis_1 = (float(self.axis_1[0]), float(self.axis_1[1]))
+        self.axis_2 = (float(self.axis_2[0]), float(self.axis_2[1]))
+        self.origin = (float(self.origin[0]), float(self.origin[1]))
+
+        if abs(self._basis_det()) <= self.match_tol:
+            raise ValueError("AOD basis vectors must be linearly independent")
+
+        # No-crossing: sorting old tone positions ascending must leave new tone
+        # positions strictly ascending. Two RF tones sweeping past each other
+        # on the same AOD would heat the atoms.
         for old, new, axis in (
-            (self.selected_rows, self.new_rows, "rows"),
-            (self.selected_cols, self.new_cols, "cols"),
+            (self.selected_axis_1, self.new_axis_1, "axis_1"),
+            (self.selected_axis_2, self.new_axis_2, "axis_2"),
         ):
             new_sorted_by_old = [n for _, n in sorted(zip(old, new))]
             for a, b in zip(new_sorted_by_old, new_sorted_by_old[1:]):
@@ -104,16 +125,44 @@ class AODStep(Step):
                         f"{list(old)} -> {list(new)}"
                     )
 
+    def _basis_det(self) -> float:
+        return (
+            self.axis_1[0] * self.axis_2[1]
+            - self.axis_1[1] * self.axis_2[0]
+        )
+
+    def _site_from_local(self, coord_1: float, coord_2: float) -> tuple[float, float]:
+        return (
+            self.origin[0] + coord_1 * self.axis_1[0] + coord_2 * self.axis_2[0],
+            self.origin[1] + coord_1 * self.axis_1[1] + coord_2 * self.axis_2[1],
+        )
+
+    def _local_from_site(self, site: tuple[float, float]) -> tuple[float, float]:
+        dx = float(site[0]) - self.origin[0]
+        dy = float(site[1]) - self.origin[1]
+        det = self._basis_det()
+        coord_1 = (dx * self.axis_2[1] - dy * self.axis_2[0]) / det
+        coord_2 = (self.axis_1[0] * dy - self.axis_1[1] * dx) / det
+        return coord_1, coord_2
+
+    def _match_index(self, value: float, choices: tuple[float, ...]) -> int | None:
+        for k, choice in enumerate(choices):
+            if abs(value - choice) <= self.match_tol:
+                return k
+        return None
+
     def _affected(self, ensemble: AtomEnsemble):
-        """Yield (atom_id, old_site, new_site) for atoms hit by the lattice op."""
-        row_map = dict(zip(self.selected_rows, self.new_rows))
-        col_map = dict(zip(self.selected_cols, self.new_cols))
-        sel_r = set(self.selected_rows)
-        sel_c = set(self.selected_cols)
+        """Yield (atom_id, old_pos, new_pos) for atoms hit by the lattice op."""
         for atomtraj in ensemble.atomtrajs:
-            i, j = atomtraj.resting_position_at(self.start_time)
-            if i in sel_r and j in sel_c:
-                yield atomtraj.atom_id, (i, j), (row_map[i], col_map[j])
+            pos = atomtraj.resting_position_at(self.start_time)
+            coord_1, coord_2 = self._local_from_site(pos)
+            idx_1 = self._match_index(coord_1, self.selected_axis_1)
+            idx_2 = self._match_index(coord_2, self.selected_axis_2)
+            if idx_1 is not None and idx_2 is not None:
+                yield atomtraj.atom_id, pos, self._site_from_local(
+                    self.new_axis_1[idx_1],
+                    self.new_axis_2[idx_2],
+                )
 
     def _shared_duration(self, ensemble: AtomEnsemble) -> float:
         """Duration of the AOD op = bang-bang time of the longest atom move."""
@@ -142,96 +191,6 @@ class AODStep(Step):
         return self.start_time + self._shared_duration(ensemble)
 
 
-@dataclass
-class DiagonalAODStep(Step):
-    """Synchronous AOD op in 45-degree rotated coordinates.
-
-    The two tone axes are:
-      - `sum = i + j`, constant on anti-diagonal lines.
-      - `diff = i - j`, constant on main-diagonal lines.
-
-    Selecting `selected_sums x selected_diffs` therefore addresses the
-    intersections of diagonal lines. This is the primitive needed to model a
-    diagonally aligned 2D-AOD, such as the one used for code-patch reflection
-    in arXiv:2412.01391.
-    """
-
-    start_time: float
-    selected_sums: tuple[float, ...]
-    selected_diffs: tuple[float, ...]
-    new_sums: tuple[float, ...]
-    new_diffs: tuple[float, ...]
-
-    def __post_init__(self):
-        if len(self.selected_sums) != len(self.new_sums):
-            raise ValueError("selected_sums and new_sums must have the same length")
-        if len(self.selected_diffs) != len(self.new_diffs):
-            raise ValueError("selected_diffs and new_diffs must have the same length")
-        for old, new, axis in (
-            (self.selected_sums, self.new_sums, "sums"),
-            (self.selected_diffs, self.new_diffs, "diffs"),
-        ):
-            new_sorted_by_old = [n for _, n in sorted(zip(old, new))]
-            for a, b in zip(new_sorted_by_old, new_sorted_by_old[1:]):
-                if a >= b:
-                    raise ValueError(
-                        f"diagonal AOD {axis} would cross or merge: "
-                        f"{list(old)} -> {list(new)}"
-                    )
-
-    @staticmethod
-    def _site_from_sum_diff(s: float, d: float) -> tuple[float, float]:
-        i = (float(s) + float(d)) / 2.0
-        j = (float(s) - float(d)) / 2.0
-        ri = round(i)
-        rj = round(j)
-        if abs(i - ri) <= 1e-9:
-            i = float(ri)
-        if abs(j - rj) <= 1e-9:
-            j = float(rj)
-        return i, j
-
-    def _affected(self, ensemble: AtomEnsemble):
-        """Yield (atom_id, old_site, new_site) for atoms hit by the rotated op."""
-        sum_map = dict(zip(self.selected_sums, self.new_sums))
-        diff_map = dict(zip(self.selected_diffs, self.new_diffs))
-        sel_s = set(self.selected_sums)
-        sel_d = set(self.selected_diffs)
-        for atomtraj in ensemble.atomtrajs:
-            i, j = atomtraj.resting_position_at(self.start_time)
-            s = i + j
-            d = i - j
-            if s in sel_s and d in sel_d:
-                yield atomtraj.atom_id, (i, j), self._site_from_sum_diff(
-                    sum_map[s],
-                    diff_map[d],
-                )
-
-    def _shared_duration(self, ensemble: AtomEnsemble) -> float:
-        """Duration of the op = bang-bang time of the longest atom move."""
-        a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
-        max_L = 0.0
-        for _, (i, j), (ni, nj) in self._affected(ensemble):
-            max_L = max(max_L, math.hypot(ni - i, nj - j))
-        return bang_bang_duration(max_L, a)
-
-    def apply(self, ensemble: AtomEnsemble) -> None:
-        affected = list(self._affected(ensemble))
-        T = self._shared_duration(ensemble)
-        if T == 0:
-            return
-        segments = []
-        for atom_id, start, end in affected:
-            seg = make_const_acc_segment(
-                start, end, self.start_time, duration=T, channel="aod"
-            )
-            segments.append((atom_id, seg))
-        ensemble.append_segments_batch(segments)
-
-    def end_time(self, ensemble: AtomEnsemble) -> float:
-        return self.start_time + self._shared_duration(ensemble)
-
-
 # --- RIPA -------------------------------------------------------------------
 
 
@@ -246,15 +205,24 @@ class RIPAStep(Step):
 
     start_time: float
     atom_id: int
-    target: tuple[int, int]
+    target: tuple[float, float]
     channel: Literal["row", "col"]
 
-    def _current_pos(self, ensemble: AtomEnsemble) -> tuple[int, int]:
+    def __post_init__(self):
+        self.target = clean_position(self.target)
+        if not is_integer_position(self.target):
+            raise ValueError(f"RIPA target must be an integer grid site: {self.target}")
+
+    def _current_pos(self, ensemble: AtomEnsemble) -> tuple[float, float]:
         """Resting site of the addressed atom at `start_time`, with a
         single-axis check against `channel`."""
         current = ensemble.atomtraj_by_id(self.atom_id).resting_position_at(
             self.start_time
         )
+        if not is_integer_position(current):
+            raise ValueError(
+                f"RIPA can only pick up atoms at integer grid sites; got {current}"
+            )
         di = self.target[0] - current[0]
         dj = self.target[1] - current[1]
         if self.channel == "row" and dj != 0:

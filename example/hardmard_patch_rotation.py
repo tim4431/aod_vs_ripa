@@ -7,9 +7,9 @@ motion as:
 
 This example demonstrates that atom moving pattern on a small square code patch.
 The horizontal reflection is delegated to the existing projected 1D log-depth AOD
-scheduler. The diagonal reflection is expanded into off-diagonal mirror-pair
-rearrangements on constant-`i+j` anti-diagonals using the 45-degree AOD support
-in `AOD1DProjectedScheduler`.
+scheduler. The diagonal reflection uses one tilted-basis 1D inversion broadcast
+across all constant-`i+j` anti-diagonals; empty AOD intersections are allowed
+and simply do not move an atom.
 
 Usage:
     python example/hardmard_patch_rotation.py            # quick GIF -> render/
@@ -33,8 +33,12 @@ if str(ROOT) not in sys.path:
 from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
 from src.routing import RoutingRequest, centered_storage_square
+from src.scheduler.aod_1d_projected import AODProjection, unit_vector
 from src.scheduler.base import SyncScheduler
-from src.scheduler.logL_1d.aod_logL_1d import AODLogL1DPerLineScheduler
+from src.scheduler.logL_1d.aod_logL_1d import (
+    AODLogL1DBroadcastLineScheduler,
+    AODLogL1DPerLineScheduler,
+)
 from src.visualization import render_animation
 
 N = 24
@@ -44,6 +48,25 @@ GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 4.0
 
 PREFIX = "hardmard_patch_rotation"
+
+
+def scaled_unit_vector(theta: float, scale: float) -> tuple[float, float]:
+    ux, uy = unit_vector(theta)
+    return scale * ux, scale * uy
+
+
+COLUMN_PROJECTION = AODProjection(
+    axis_1=unit_vector(0.0),
+    axis_2=unit_vector(math.pi / 2.0),
+    fixed_axis="axis_2",
+    name="columns",
+)
+ANTI_DIAGONAL_PROJECTION = AODProjection(
+    axis_1=scaled_unit_vector(math.pi / 4.0, 1.0 / math.sqrt(2.0)),
+    axis_2=scaled_unit_vector(-math.pi / 4.0, 1.0 / math.sqrt(2.0)),
+    fixed_axis="axis_1",
+    name="anti_diagonals",
+)
 
 
 def hadamard_rotation_targets(src):
@@ -84,21 +107,23 @@ class AODHadamardPatchRotationScheduler(SyncScheduler):
                 dst=mid,
                 labeled=True,
             ),
-            axis="col",
+            projection=COLUMN_PROJECTION,
         ).plan()
         self._append_rebased_steps(phase1.steps)
 
         # Phase 2: diagonal reflection. Reflection across the main diagonal
-        # preserves `i + j` and reverses `i - j`, so each anti-diagonal is a
-        # projected 1D AOD problem with a 45-degree lift lane.
-        phase2 = AODLogL1DPerLineScheduler(
+        # preserves `i + j` and reverses `i - j`. One 1D inversion of the
+        # free coordinate is broadcast across all anti-diagonals; many AOD
+        # intersections are empty and therefore harmless.
+        phase2 = AODLogL1DBroadcastLineScheduler(
             RoutingRequest(
                 grid=self.request.grid,
                 src=mid,
                 dst=self.request.dst,
                 labeled=True,
             ),
-            axis="anti_diag",
+            projection=ANTI_DIAGONAL_PROJECTION,
+            template_fixed=pivot_sum,
         ).plan()
         self._append_rebased_steps(phase2.steps)
 
@@ -178,7 +203,7 @@ def main() -> None:
         view="benchmark",
         quality=quality,
         time_dilation=5e3,
-        hold_seconds=1.25,
+        hold_seconds=1.5,
         atom_colors=patch_rotation_colors(src),
         show_routing_on_start=True,
         title=f"Hadamard patch rotation ({PATCH_SIDE}x{PATCH_SIDE})",

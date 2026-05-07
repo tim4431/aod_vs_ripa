@@ -32,7 +32,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ...atom_config import Grid
+from ...atom_config import Grid, is_integer_position
 from ...moving_sequence import MovingSequence
 from ...routing import Site
 from ._manhattan_planner import (
@@ -81,6 +81,12 @@ def _manhattan_sites(a: Site, b: Site) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+def _integer_site(site: Site) -> tuple[int, int]:
+    if not is_integer_position(site):
+        raise ValueError(f"RIPA pebble routing requires integer sites: {site}")
+    return int(round(site[0])), int(round(site[1]))
+
+
 def assign_uncolored(sources: Sequence[Site],
                      targets: Sequence[Site]) -> Assignment:
     """Min-total-Manhattan-distance bijection sources -> targets via Hungarian.
@@ -123,6 +129,8 @@ def plan_uncolored(req: UncoloredRequest, grid: Grid,
     other than the lib's even/even convention work without extra wiring.
     """
     assignment = assign_uncolored(req.sources, req.targets)
+    sources = [_integer_site(site) for site in req.sources]
+    targets = [_integer_site(site) for site in req.targets]
 
     if req.atom_ids is None:
         atom_ids = list(range(len(req.sources)))
@@ -134,8 +142,8 @@ def plan_uncolored(req: UncoloredRequest, grid: Grid,
     moves = [
         RoutingMove(
             atom_id=atom_ids[i],
-            src=req.sources[i],
-            dst=req.targets[j],
+            src=sources[i],
+            dst=targets[j],
             deadline=req.deadline,
         )
         for i, j in assignment.pairs
@@ -204,19 +212,21 @@ class RIPAPebRouteScheduler(Scheduler):
     def _plan(self) -> None:
         # Build the per-atom move list. For unlabeled requests we pick the
         # Hungarian-optimal bijection first, then route as if labeled.
+        src_sites = [_integer_site(site) for site in self.request.src]
+        dst_sites = [_integer_site(site) for site in self.request.dst]
         if self.request.labeled:
             moves = [
                 RoutingMove(atom_id=k,
-                            src=tuple(self.request.src[k]),
-                            dst=tuple(self.request.dst[k]))
-                for k in range(len(self.request.src))
+                            src=src_sites[k],
+                            dst=dst_sites[k])
+                for k in range(len(src_sites))
             ]
         else:
-            assignment = assign_uncolored(self.request.src, self.request.dst)
+            assignment = assign_uncolored(src_sites, dst_sites)
             moves = [
                 RoutingMove(atom_id=i,
-                            src=tuple(self.request.src[i]),
-                            dst=tuple(self.request.dst[j]))
+                            src=src_sites[i],
+                            dst=dst_sites[j])
                 for (i, j) in assignment.pairs
             ]
 

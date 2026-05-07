@@ -91,30 +91,30 @@ class ManualAODXInversionScheduler(SyncScheduler):
             (xs[3], xs[1]),
         ]
         for x_old, x_new in phase1:
-            self._aod(selected_rows=(x_old,), selected_cols=ys_t,
-                      new_rows=(x_old,), new_cols=ys_biased)
-            self._aod(selected_rows=(x_old,), selected_cols=ys_biased,
-                      new_rows=(x_new,), new_cols=ys_biased)
-            self._aod(selected_rows=(x_new,), selected_cols=ys_biased,
-                      new_rows=(x_new,), new_cols=ys_t)
+            self._aod(selected_axis_1=(x_old,), selected_axis_2=ys_t,
+                      new_axis_1=(x_old,), new_axis_2=ys_biased)
+            self._aod(selected_axis_1=(x_old,), selected_axis_2=ys_biased,
+                      new_axis_1=(x_new,), new_axis_2=ys_biased)
+            self._aod(selected_axis_1=(x_new,), selected_axis_2=ys_biased,
+                      new_axis_1=(x_new,), new_axis_2=ys_t)
 
         # Phase 2: one synchronous AOD shifting the left cluster
         # (cols at -1, 0, 1, 2) by one storage slot to the right. Cols 1
         # and 0 (at xs[4] and xs[5]) are outside the lattice and stay put.
         self._aod(
-            selected_rows=(outside_left, xs[0], xs[1], xs[2]),
-            selected_cols=ys_t,
-            new_rows=(xs[0], xs[1], xs[2], xs[3]),
-            new_cols=ys_t,
+            selected_axis_1=(outside_left, xs[0], xs[1], xs[2]),
+            selected_axis_2=ys_t,
+            new_axis_1=(xs[0], xs[1], xs[2], xs[3]),
+            new_axis_2=ys_t,
         )
 
-    def _aod(self, *, selected_rows, selected_cols, new_rows, new_cols):
+    def _aod(self, *, selected_axis_1, selected_axis_2, new_axis_1, new_axis_2):
         self.append_step(AODStep(
             start_time=self.sequence.next_start_time(),
-            selected_rows=selected_rows,
-            selected_cols=selected_cols,
-            new_rows=new_rows,
-            new_cols=new_cols,
+            selected_axis_1=selected_axis_1,
+            selected_axis_2=selected_axis_2,
+            new_axis_1=new_axis_1,
+            new_axis_2=new_axis_2,
         ))
 
 

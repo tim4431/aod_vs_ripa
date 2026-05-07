@@ -46,10 +46,10 @@ class AODTetrisScheduler(SyncScheduler):
             self.append_step(
                 AODStep(
                     start_time=self.sequence.next_start_time(),
-                    selected_rows=move.selected_rows,
-                    selected_cols=move.selected_cols,
-                    new_rows=move.new_rows,
-                    new_cols=move.new_cols,
+                    selected_axis_1=move.selected_rows,
+                    selected_axis_2=move.selected_cols,
+                    new_axis_1=move.new_rows,
+                    new_axis_2=move.new_cols,
                 )
             )
 

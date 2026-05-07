@@ -10,8 +10,9 @@ does *not* mark atoms as physically distinguishable; whether atoms are
 distinguishable is a property of the routing problem.
 
 Conventions:
-- Between ordinary segments, an atom rests at an integer site. AOD detours may
-  temporarily rest on half-grid lift lanes before lowering back to storage.
+- Resting positions are float-coordinate trap positions. AOD may rest anywhere
+  in this coordinate plane; RIPA steps separately enforce integer row/column
+  hand-off sites.
 - Segments must be contiguous in space (next.start_pos == prev.end_pos)
   and non-overlapping in time (next.start_time >= prev.end_time).
 """
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .atom_config import AtomConfig, Grid
+from .atom_config import AtomConfig, Grid, clean_position, position_key
 from .segments import Segment, make_hold
 
 _TIME_TOL = 1e-12
@@ -57,13 +58,13 @@ class CollisionError(ValueError):
 @dataclass
 class AtomTrajectory:
     atom_id: int
-    initial_pos: tuple[int, int]  # site at t = 0
+    initial_pos: tuple[float, float]  # position at t = 0
     segments: list[Segment] = field(default_factory=list)
 
     # ---- queries ------------------------------------------------------------
 
     def position_at(self, t: float) -> tuple[float, float]:
-        """Position at global time t. Float during motion; integer/half at rest."""
+        """Position at global time t."""
         if not self.segments or t <= self.segments[0].start_time:
             return float(self.initial_pos[0]), float(self.initial_pos[1])
         last_end_pos = self.initial_pos
@@ -87,10 +88,10 @@ class AtomTrajectory:
         for seg in self.segments:
             if seg.end_time <= t + tol:
                 latest = seg.end_pos
-        return latest
+        return clean_position(latest)
 
     @property
-    def final_pos(self) -> tuple[int, int]:
+    def final_pos(self) -> tuple[float, float]:
         return self.segments[-1].end_pos if self.segments else self.initial_pos
 
     @property
@@ -206,7 +207,7 @@ class AtomEnsemble:
     @classmethod
     def from_config(cls, grid: Grid, cfg: AtomConfig) -> "AtomEnsemble":
         atoms = [
-            AtomTrajectory(atom_id=int(aid), initial_pos=(int(p[0]), int(p[1])))
+            AtomTrajectory(atom_id=int(aid), initial_pos=clean_position(p))
             for p, aid in zip(cfg.positions, cfg.atom_ids)
         ]
         return cls(grid=grid, atomtrajs=atoms)
@@ -233,13 +234,16 @@ class AtomEnsemble:
     def total_duration(self) -> float:
         return max((a.final_time for a in self.atomtrajs), default=0.0)
 
-    def occupancy_at_rest(self, t: float) -> dict[tuple[int, int], int]:
-        """Map site -> atom_id for atoms at rest at t. Errors on duplicates."""
-        occ: dict[tuple[int, int], int] = {}
+    def occupancy_at_rest(self, t: float) -> dict[tuple[float, float], int]:
+        """Map resting position -> atom_id. Errors on duplicate positions."""
+        occ: dict[tuple[float, float], int] = {}
+        seen: set[tuple[int, int]] = set()
         for a in self.atomtrajs:
             site = a.resting_position_at(t)
-            if site in occ:
+            key = position_key(site)
+            if key in seen:
                 raise ValueError(f"two atoms at site {site} at t={t}")
+            seen.add(key)
             occ[site] = a.atom_id
         return occ
 
