@@ -4,10 +4,13 @@ Both step types subclass `Step` and share one effect: they append
 `Trajectory` segments to the relevant `AtomTrajectory`s in an
 `AtomEnsemble`. They differ in how they pick atoms and shape moves:
 
-* `AODStep` — synchronous lattice operation. Defined by selected
+* `AODStep` — synchronous axis-aligned lattice operation. Defined by selected
   rows/cols and their new positions; only atoms at the cartesian
   product (selected_rows x selected_cols) are moved, all sharing one
   start_time and one duration (set by the longest move).
+* `DiagonalAODStep` — synchronous 45-degree AOD operation. It addresses
+  rotated coordinates `sum = i + j` and `diff = i - j`, so the selected
+  intersections are diagonal lattice lines instead of row/column lines.
 
 * `RIPAStep` — single-atom move, addressed by `atom_id`. Travels along
   one EOM channel ('row' moves along x with j fixed, 'col' moves along
@@ -127,6 +130,96 @@ class AODStep(Step):
             return  # nobody moves; nothing to record
         # All atoms share the longest move's duration. Shorter moves
         # therefore run with implied accel = 4*L/T**2 < a_max.
+        segments = []
+        for atom_id, start, end in affected:
+            seg = make_const_acc_segment(
+                start, end, self.start_time, duration=T, channel="aod"
+            )
+            segments.append((atom_id, seg))
+        ensemble.append_segments_batch(segments)
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        return self.start_time + self._shared_duration(ensemble)
+
+
+@dataclass
+class DiagonalAODStep(Step):
+    """Synchronous AOD op in 45-degree rotated coordinates.
+
+    The two tone axes are:
+      - `sum = i + j`, constant on anti-diagonal lines.
+      - `diff = i - j`, constant on main-diagonal lines.
+
+    Selecting `selected_sums x selected_diffs` therefore addresses the
+    intersections of diagonal lines. This is the primitive needed to model a
+    diagonally aligned 2D-AOD, such as the one used for code-patch reflection
+    in arXiv:2412.01391.
+    """
+
+    start_time: float
+    selected_sums: tuple[float, ...]
+    selected_diffs: tuple[float, ...]
+    new_sums: tuple[float, ...]
+    new_diffs: tuple[float, ...]
+
+    def __post_init__(self):
+        if len(self.selected_sums) != len(self.new_sums):
+            raise ValueError("selected_sums and new_sums must have the same length")
+        if len(self.selected_diffs) != len(self.new_diffs):
+            raise ValueError("selected_diffs and new_diffs must have the same length")
+        for old, new, axis in (
+            (self.selected_sums, self.new_sums, "sums"),
+            (self.selected_diffs, self.new_diffs, "diffs"),
+        ):
+            new_sorted_by_old = [n for _, n in sorted(zip(old, new))]
+            for a, b in zip(new_sorted_by_old, new_sorted_by_old[1:]):
+                if a >= b:
+                    raise ValueError(
+                        f"diagonal AOD {axis} would cross or merge: "
+                        f"{list(old)} -> {list(new)}"
+                    )
+
+    @staticmethod
+    def _site_from_sum_diff(s: float, d: float) -> tuple[float, float]:
+        i = (float(s) + float(d)) / 2.0
+        j = (float(s) - float(d)) / 2.0
+        ri = round(i)
+        rj = round(j)
+        if abs(i - ri) <= 1e-9:
+            i = float(ri)
+        if abs(j - rj) <= 1e-9:
+            j = float(rj)
+        return i, j
+
+    def _affected(self, ensemble: AtomEnsemble):
+        """Yield (atom_id, old_site, new_site) for atoms hit by the rotated op."""
+        sum_map = dict(zip(self.selected_sums, self.new_sums))
+        diff_map = dict(zip(self.selected_diffs, self.new_diffs))
+        sel_s = set(self.selected_sums)
+        sel_d = set(self.selected_diffs)
+        for atomtraj in ensemble.atomtrajs:
+            i, j = atomtraj.resting_position_at(self.start_time)
+            s = i + j
+            d = i - j
+            if s in sel_s and d in sel_d:
+                yield atomtraj.atom_id, (i, j), self._site_from_sum_diff(
+                    sum_map[s],
+                    diff_map[d],
+                )
+
+    def _shared_duration(self, ensemble: AtomEnsemble) -> float:
+        """Duration of the op = bang-bang time of the longest atom move."""
+        a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
+        max_L = 0.0
+        for _, (i, j), (ni, nj) in self._affected(ensemble):
+            max_L = max(max_L, math.hypot(ni - i, nj - j))
+        return bang_bang_duration(max_L, a)
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        affected = list(self._affected(ensemble))
+        T = self._shared_duration(ensemble)
+        if T == 0:
+            return
         segments = []
         for atom_id, start, end in affected:
             seg = make_const_acc_segment(

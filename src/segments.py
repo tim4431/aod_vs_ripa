@@ -1,11 +1,10 @@
 """Per-segment motion profiles, with absolute timing.
 
-A `Trajectory` is one *timed* segment of a single atom's life. Atoms
-rest at integer sites between segments; each segment goes integer ->
-integer (start_pos -> end_pos), with float positions during 0 < t_local
-< duration. Segments carry their absolute `start_time` so the global
-timeline of a Sequence can be reconstructed by looking at any atom's
-trajectory list.
+A `Trajectory` is one *timed* segment of a single atom's life. Atoms usually
+rest at integer sites between segments; AOD detours may temporarily rest on
+half-grid lift lanes before lowering back to storage. Segments carry their
+absolute `start_time` so the global timeline of a Sequence can be reconstructed
+by looking at any atom's trajectory list.
 
 The default move profile is a symmetric bang-bang: constant +a_max,
 then -a_max, no coast phase. Fully determined by distance and a_max.
@@ -28,8 +27,8 @@ Axis = Literal["x", "y"]  # x == i-coordinate, y == j-coordinate
 class Segment:
     start_time: float  # absolute global time [s]
     duration: float  # length of this segment [s]
-    start_pos: tuple[int, int]  # integer site at t = start_time
-    end_pos: tuple[int, int]  # integer site at t = end_time
+    start_pos: tuple[float, float]  # integer site, or temporary half-grid lane
+    end_pos: tuple[float, float]  # integer site, or temporary half-grid lane
     fn: TrajFn  # local-time -> (i, j) float
     channel: Optional[Channel] = None  # which addressing channel drove the move
     profile: Optional[Profile] = None  # local-time -> path fraction, when known
@@ -39,7 +38,7 @@ class Segment:
         return self.start_time + self.duration
 
     @property
-    def delta(self) -> tuple[int, int]:
+    def delta(self) -> tuple[float, float]:
         return self.end_pos[0] - self.start_pos[0], self.end_pos[1] - self.start_pos[1]
 
     @property
@@ -108,8 +107,8 @@ def bang_bang_duration(distance: float, accel: float) -> float:
 # covered. profile(0) should be ~0 and profile(duration) should be ~1.
 
 def make_segment(
-    start: tuple[int, int],
-    end: tuple[int, int],
+    start: tuple[float, float],
+    end: tuple[float, float],
     start_time: float,
     duration: float,
     profile: Profile,
@@ -129,18 +128,18 @@ def make_segment(
     """
     di = end[0] - start[0]
     dj = end[1] - start[1]
-    s_int = (int(start[0]), int(start[1]))
-    e_int = (int(end[0]), int(end[1]))
+    s_pos = (_clean_coord(start[0]), _clean_coord(start[1]))
+    e_pos = (_clean_coord(end[0]), _clean_coord(end[1]))
 
-    def fn(t: float, _di=di, _dj=dj, _s=s_int, _p=profile) -> tuple[float, float]:
+    def fn(t: float, _di=di, _dj=dj, _s=s_pos, _p=profile) -> tuple[float, float]:
         u = _p(t)
         return _s[0] + u * _di, _s[1] + u * _dj
 
     return Segment(
         start_time=start_time,
         duration=duration,
-        start_pos=s_int,
-        end_pos=e_int,
+        start_pos=s_pos,
+        end_pos=e_pos,
         fn=fn,
         channel=channel,
         profile=profile,
@@ -164,8 +163,8 @@ def _bang_bang_profile(t_local: float, T: float) -> float:
 
 
 def make_const_acc_segment(
-    start: tuple[int, int],
-    end: tuple[int, int],
+    start: tuple[float, float],
+    end: tuple[float, float],
     start_time: float,
     *,
     accel: Optional[float] = None,
@@ -200,14 +199,14 @@ def make_const_acc_segment(
 
 
 def make_hold(
-    pos: tuple[int, int],
+    pos: tuple[float, float],
     start_time: float,
     duration: float,
     *,
     channel: Optional[Channel] = None,
 ) -> Segment:
     """Stay-put segment. Useful for forced waits."""
-    p = (int(pos[0]), int(pos[1]))
+    p = (_clean_coord(pos[0]), _clean_coord(pos[1]))
     return Segment(
         start_time=start_time,
         duration=duration,
@@ -216,3 +215,12 @@ def make_hold(
         fn=lambda t, _p=p: (float(_p[0]), float(_p[1])),
         channel=channel,
     )
+
+
+def _clean_coord(value: float) -> float:
+    """Keep integer coordinates as ints, but preserve half-grid lift lanes."""
+    x = float(value)
+    rounded = round(x)
+    if abs(x - rounded) <= 1e-9:
+        return int(rounded)
+    return x

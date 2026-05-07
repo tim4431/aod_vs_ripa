@@ -1,12 +1,11 @@
-"""log(L)-depth AOD scheduler for 1D rearrangement on a single row/column.
+"""log(L)-depth AOD scheduler for 1D rearrangement on one projected line.
 
 Wraps `aod_logL_1d_rearrangement` (in `logL_1d.py`) for the
 `scheduler.base` Scheduler API. The 1D-on-2D machinery (axis projection,
 lift/slide/lower execution, consolidation) lives in
 `AOD1DProjectedScheduler`; this module supplies only the planner-specific
 pieces (minimum workspace size, the planner call, the natural deposition
-pattern) plus a per-row/column broadcast wrapper for axis-preserving 2D
-routings.
+pattern) plus a per-line broadcast wrapper for axis-preserving 2D routings.
 """
 
 from __future__ import annotations
@@ -14,9 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from ...movement import AODStep
+from ...movement import AODStep, DiagonalAODStep
 from ...routing import RoutingRequest
-from ..aod_1d_projected import AOD1DProjectedScheduler, Axis, PlannerMove
+from ..aod_1d_projected import (
+    AOD1DProjectedScheduler,
+    Axis,
+    PlannerMove,
+    project_site,
+)
 from ..base import SyncScheduler
 from .logL_1d import aod_logL_1d_rearrangement
 
@@ -43,8 +47,8 @@ def _natural_pattern(n: int) -> list[int]:
 class AODLogL1DScheduler(AOD1DProjectedScheduler):
     """log(L)-depth AOD scheduler for 1D rearrangement.
 
-    Requires every src and dst site to lie on one shared row, or every
-    src and dst site to lie on one shared column. Works for both labeled
+    Requires every src and dst site to lie on one shared projected line: row,
+    column, anti-diagonal, or main diagonal. Works for both labeled
     (atom k -> dst[k]) and unlabeled (set -> set) requests.
     """
 
@@ -67,74 +71,71 @@ class AODLogL1DScheduler(AOD1DProjectedScheduler):
 class AODLogL1DPerLineScheduler(SyncScheduler):
     """Apply `AODLogL1DScheduler` to every row/column simultaneously.
 
-    For a routing that preserves one coordinate (every src and matching
-    dst share a row or share a column), the rearrangement decomposes into
-    independent 1D subproblems along the perpendicular axis. The per-line
-    subproblems must be identical (same sorted src and dst, same labeled
-    order); the scheduler plans the first line once with
-    `AODLogL1DScheduler` and broadcasts every emitted AODStep across all
-    lines simultaneously by extending the fixed-axis tuple to all line
-    indices. This collapses the work of N lines into the move count of
-    one line.
+    For a routing that preserves one projected coordinate (row, column,
+    anti-diagonal, or main diagonal), the rearrangement decomposes into
+    independent 1D subproblems along the free coordinate. Lines with identical
+    subproblems are planned once with `AODLogL1DScheduler` and broadcast
+    together by extending the fixed-axis tone tuple. This collapses identical
+    lines into the move count of one line while still allowing non-identical
+    line lengths to run as separate groups.
 
     `axis` matches the AODLogL1DScheduler convention:
       - "col": each column is preserved; planner moves atoms along rows.
       - "row": each row is preserved; planner moves atoms along cols.
+      - "anti_diag": each `i + j` line is preserved; planner moves along `i - j`.
+      - "main_diag": each `i - j` line is preserved; planner moves along `i + j`.
     """
 
     axis: Axis = "col"
 
     def _plan(self) -> None:
-        fixed_idx = 0 if self.axis == "row" else 1
-        free_idx = 1 - fixed_idx
-
         by_line: dict[int, list[tuple[tuple[int, int], tuple[int, int]]]] = {}
         for src, dst in zip(self.request.src, self.request.dst):
-            if src[fixed_idx] != dst[fixed_idx]:
+            src_fixed, _ = project_site(self.axis, src)
+            dst_fixed, _ = project_site(self.axis, dst)
+            if src_fixed != dst_fixed:
                 raise ValueError(
                     f"axis={self.axis!r} requires {self.axis}-preserving "
                     f"routing; {src} -> {dst} crosses {self.axis}s"
                 )
-            by_line.setdefault(src[fixed_idx], []).append((src, dst))
+            by_line.setdefault(src_fixed, []).append((src, dst))
 
         lines = sorted(by_line)
         if not lines:
             return
 
-        first = lines[0]
-        first_pairs = by_line[first]
-        canon_src = [s[free_idx] for s, _ in first_pairs]
-        canon_dst = [d[free_idx] for _, d in first_pairs]
-        for line in lines[1:]:
+        groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[int]] = {}
+        for line in lines:
             pairs = by_line[line]
-            if [s[free_idx] for s, _ in pairs] != canon_src or \
-               [d[free_idx] for _, d in pairs] != canon_dst:
-                raise ValueError(
-                    f"AODLogL1DPerLineScheduler requires identical per-"
-                    f"{self.axis} subproblems; {self.axis} {line} differs "
-                    f"from {self.axis} {first}"
-                )
+            canon_src = tuple(project_site(self.axis, s)[1] for s, _ in pairs)
+            canon_dst = tuple(project_site(self.axis, d)[1] for _, d in pairs)
+            groups.setdefault((canon_src, canon_dst), []).append(line)
 
-        sub = AODLogL1DScheduler(
-            request=RoutingRequest(
-                grid=self.request.grid,
-                src=[s for s, _ in first_pairs],
-                dst=[d for _, d in first_pairs],
-                labeled=self.request.labeled,
-            ),
-            axis=self.axis,
-        )
-        for step in sub.plan().steps:
-            self.append_step(self._broadcast_step(step, first, lines))
+        for group_lines in groups.values():
+            first = group_lines[0]
+            first_pairs = by_line[first]
+            sub = AODLogL1DScheduler(
+                request=RoutingRequest(
+                    grid=self.request.grid,
+                    src=[s for s, _ in first_pairs],
+                    dst=[d for _, d in first_pairs],
+                    labeled=self.request.labeled,
+                ),
+                axis=self.axis,
+            )
+            for step in sub.plan().steps:
+                self.append_step(self._broadcast_step(step, first, group_lines))
 
     def _broadcast_step(
         self,
-        step: AODStep,
+        step: AODStep | DiagonalAODStep,
         first: int,
         lines: list[int],
-    ) -> AODStep:
+    ) -> AODStep | DiagonalAODStep:
         start_time = self.sequence.next_start_time()
         if self.axis == "col":
+            if not isinstance(step, AODStep):
+                raise TypeError("col broadcast expects AODStep")
             d_old = step.selected_cols[0] - first
             d_new = step.new_cols[0] - first
             return AODStep(
@@ -144,12 +145,40 @@ class AODLogL1DPerLineScheduler(SyncScheduler):
                 selected_cols=tuple(line + d_old for line in lines),
                 new_cols=tuple(line + d_new for line in lines),
             )
-        d_old = step.selected_rows[0] - first
-        d_new = step.new_rows[0] - first
-        return AODStep(
-            start_time=start_time,
-            selected_rows=tuple(line + d_old for line in lines),
-            new_rows=tuple(line + d_new for line in lines),
-            selected_cols=step.selected_cols,
-            new_cols=step.new_cols,
-        )
+        if self.axis == "row":
+            if not isinstance(step, AODStep):
+                raise TypeError("row broadcast expects AODStep")
+            d_old = step.selected_rows[0] - first
+            d_new = step.new_rows[0] - first
+            return AODStep(
+                start_time=start_time,
+                selected_rows=tuple(line + d_old for line in lines),
+                new_rows=tuple(line + d_new for line in lines),
+                selected_cols=step.selected_cols,
+                new_cols=step.new_cols,
+            )
+        if self.axis == "anti_diag":
+            if not isinstance(step, DiagonalAODStep):
+                raise TypeError("anti_diag broadcast expects DiagonalAODStep")
+            d_old = step.selected_sums[0] - first
+            d_new = step.new_sums[0] - first
+            return DiagonalAODStep(
+                start_time=start_time,
+                selected_sums=tuple(line + d_old for line in lines),
+                new_sums=tuple(line + d_new for line in lines),
+                selected_diffs=step.selected_diffs,
+                new_diffs=step.new_diffs,
+            )
+        if self.axis == "main_diag":
+            if not isinstance(step, DiagonalAODStep):
+                raise TypeError("main_diag broadcast expects DiagonalAODStep")
+            d_old = step.selected_diffs[0] - first
+            d_new = step.new_diffs[0] - first
+            return DiagonalAODStep(
+                start_time=start_time,
+                selected_sums=step.selected_sums,
+                new_sums=step.new_sums,
+                selected_diffs=tuple(line + d_old for line in lines),
+                new_diffs=tuple(line + d_new for line in lines),
+            )
+        raise ValueError(f"unknown AOD projection axis: {self.axis!r}")

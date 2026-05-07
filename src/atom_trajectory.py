@@ -10,7 +10,8 @@ does *not* mark atoms as physically distinguishable; whether atoms are
 distinguishable is a property of the routing problem.
 
 Conventions:
-- Between segments, an atom rests at an integer site.
+- Between ordinary segments, an atom rests at an integer site. AOD detours may
+  temporarily rest on half-grid lift lanes before lowering back to storage.
 - Segments must be contiguous in space (next.start_pos == prev.end_pos)
   and non-overlapping in time (next.start_time >= prev.end_time).
 """
@@ -62,7 +63,7 @@ class AtomTrajectory:
     # ---- queries ------------------------------------------------------------
 
     def position_at(self, t: float) -> tuple[float, float]:
-        """Position at global time t. Float during motion, integer at rest."""
+        """Position at global time t. Float during motion; integer/half at rest."""
         if not self.segments or t <= self.segments[0].start_time:
             return float(self.initial_pos[0]), float(self.initial_pos[1])
         last_end_pos = self.initial_pos
@@ -74,8 +75,8 @@ class AtomTrajectory:
             last_end_pos = seg.end_pos
         return float(last_end_pos[0]), float(last_end_pos[1])
 
-    def resting_position_at(self, t: float, *, tol: float = 1e-9) -> tuple[int, int]:
-        """Integer site at time t. Errors if the atom is in motion at t."""
+    def resting_position_at(self, t: float, *, tol: float = 1e-9) -> tuple[float, float]:
+        """Resting position at time t. Errors if the atom is in motion at t."""
         for seg in self.segments:
             if seg.start_time + tol < t < seg.end_time - tol:
                 raise ValueError(
@@ -246,7 +247,7 @@ class AtomEnsemble:
         """Snapshot of final resting positions, preserving atom_ids.
         The returned config does not carry the grid — fetch it from
         this `AtomEnsemble` if needed."""
-        positions = np.array([a.final_pos for a in self.atomtrajs], dtype=int)
+        positions = np.array([a.final_pos for a in self.atomtrajs], dtype=float)
         atom_ids = np.array([a.atom_id for a in self.atomtrajs], dtype=int)
         return AtomConfig(positions=positions, atom_ids=atom_ids)
 
