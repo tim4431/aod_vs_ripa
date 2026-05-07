@@ -1042,12 +1042,15 @@ def _draw_gaussian_blob(ax: Any, x: float, y: float) -> None:
     vals = np.linspace(-r, r, 21)
     xx, yy = np.meshgrid(vals, vals)
     zz = np.exp(-(xx**2 + yy**2) / (2.0 * BLOB_SIGMA**2))
+    rgba = np.empty((*zz.shape, 4), dtype=float)
+    rgba[..., 0] = 0.839  # #d62728 — match trap-outline red
+    rgba[..., 1] = 0.153
+    rgba[..., 2] = 0.157
+    rgba[..., 3] = 0.55 * zz
     ax.imshow(
-        zz,
+        rgba,
         extent=(x - r, x + r, y - r, y + r),
         origin="lower",
-        cmap="Reds",
-        alpha=0.55 * zz,
         interpolation="bilinear",
         zorder=Z_TRAP_BLOB,
     )
