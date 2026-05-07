@@ -23,6 +23,7 @@ import math
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal
 
 import matplotlib as mpl
 
@@ -32,13 +33,16 @@ if str(ROOT) not in sys.path:
 
 from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
+from src.atom_trajectory import AtomEnsemble
+from src.movement import PHYS_A_MAX, Step, grid_accel_from_phys
 from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.aod_1d_projected import AODProjection, unit_vector
-from src.scheduler.base import SyncScheduler
+from src.scheduler.base import AsyncScheduler, SyncScheduler
 from src.scheduler.logL_1d.aod_logL_1d import (
     AODLogL1DBroadcastLineScheduler,
     AODLogL1DPerLineScheduler,
 )
+from src.segments import bang_bang_duration, make_const_acc_segment
 from src.visualization import render_animation
 
 N = 24
@@ -48,6 +52,8 @@ GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 4.0
 
 PREFIX = "hardmard_patch_rotation"
+RIPAChannel = Literal["row", "col"]
+RIPABatchMove = tuple[int, tuple[float, float], RIPAChannel]
 
 
 def scaled_unit_vector(theta: float, scale: float) -> tuple[float, float]:
@@ -67,6 +73,64 @@ ANTI_DIAGONAL_PROJECTION = AODProjection(
     fixed_axis="axis_1",
     name="anti_diagonals",
 )
+
+
+@dataclass
+class RIPABatchStep(Step):
+    """Manual same-start batch of independent RIPA moves."""
+
+    start_time: float
+    moves: tuple[RIPABatchMove, ...]
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
+        segments = []
+        for atom_id, target, channel in self.moves:
+            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
+                self.start_time
+            )
+            self._check_channel(current, target, channel)
+            if current == target:
+                continue
+            segments.append((
+                atom_id,
+                make_const_acc_segment(
+                    current,
+                    target,
+                    self.start_time,
+                    accel=accel,
+                    channel=channel,
+                ),
+            ))
+        ensemble.append_segments_batch(segments)
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
+        duration = 0.0
+        for atom_id, target, channel in self.moves:
+            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
+                self.start_time
+            )
+            self._check_channel(current, target, channel)
+            duration = max(
+                duration,
+                bang_bang_duration(
+                    math.hypot(target[0] - current[0], target[1] - current[1]),
+                    accel,
+                ),
+            )
+        return self.start_time + duration
+
+    @staticmethod
+    def _check_channel(
+        current: tuple[float, float],
+        target: tuple[float, float],
+        channel: RIPAChannel,
+    ) -> None:
+        if channel == "row" and current[1] != target[1]:
+            raise ValueError(f"row-channel RIPA move must keep j fixed: {current}->{target}")
+        if channel == "col" and current[0] != target[0]:
+            raise ValueError(f"col-channel RIPA move must keep i fixed: {current}->{target}")
 
 
 def hadamard_rotation_targets(src):
@@ -144,8 +208,112 @@ class AODHadamardPatchRotationScheduler(SyncScheduler):
             self.append_step(replace(step, start_time=self.sequence.next_start_time()))
 
 
+@dataclass
+class ManualRIPAHadamardPatchRotationScheduler(AsyncScheduler):
+    """Manual RIPA square-ring rotation for the 5x5 Hadamard patch.
+
+    Each layer is an independent perimeter convoy. One RIPA hop advances every
+    atom on that perimeter to the next storage site, and repeating this by the
+    side length minus one realizes the 90-degree rotation. Distinct layers use
+    independent timelines and can run simultaneously.
+    """
+
+    def _plan(self) -> None:
+        coords = self._validate_square_patch()
+        atom_id_by_site = {
+            tuple(site): atom_id for atom_id, site in enumerate(self.request.src)
+        }
+        hop_duration = self._hop_duration(coords)
+
+        for layer in range(len(coords) // 2):
+            ring = self._ring_positions(coords, layer)
+            shifts = len(coords) - 1 - 2 * layer
+            self._append_ring_rotation(
+                ring,
+                shifts,
+                atom_id_by_site,
+                hop_duration,
+            )
+
+    def _append_ring_rotation(
+        self,
+        ring: list[tuple[float, float]],
+        shifts: int,
+        atom_id_by_site: dict[tuple[float, float], int],
+        hop_duration: float,
+    ) -> None:
+        ring_len = len(ring)
+        for shift in range(shifts):
+            start_time = shift * hop_duration
+            moves: list[RIPABatchMove] = []
+            for source_index, source_site in enumerate(ring):
+                current = ring[(source_index + shift) % ring_len]
+                target = ring[(source_index + shift + 1) % ring_len]
+                moves.append((
+                    atom_id_by_site[source_site],
+                    target,
+                    self._channel(current, target),
+                ))
+            self.append_step(RIPABatchStep(
+                start_time=start_time,
+                moves=tuple(moves),
+            ))
+
+    def _validate_square_patch(self) -> list[float]:
+        coords = sorted({i for i, _ in self.request.src})
+        cols = sorted({j for _, j in self.request.src})
+        if coords != cols:
+            raise ValueError("Manual RIPA patch demo expects identical row/col coords")
+        if len(coords) != PATCH_SIDE:
+            raise ValueError(
+                f"Manual RIPA patch demo expects a {PATCH_SIDE}x{PATCH_SIDE} patch"
+            )
+        expected = {(i, j) for i in coords for j in coords}
+        if set(self.request.src) != expected:
+            raise ValueError("Manual RIPA patch demo expects a filled square patch")
+        if self.request.dst != hadamard_rotation_targets(self.request.src):
+            raise ValueError("request dst does not match the 90-degree patch rotation")
+        gaps = [b - a for a, b in zip(coords, coords[1:])]
+        if not gaps or any(abs(gap - gaps[0]) > 1e-9 for gap in gaps):
+            raise ValueError("Manual RIPA patch demo expects evenly spaced storage sites")
+        return coords
+
+    @staticmethod
+    def _ring_positions(
+        coords: list[float],
+        layer: int,
+    ) -> list[tuple[float, float]]:
+        vals = coords[layer: len(coords) - layer]
+        if len(vals) <= 1:
+            return []
+        lo, hi = vals[0], vals[-1]
+        return (
+            [(lo, j) for j in vals]
+            + [(i, hi) for i in vals[1:]]
+            + [(hi, j) for j in reversed(vals[:-1])]
+            + [(i, lo) for i in reversed(vals[1:-1])]
+        )
+
+    def _hop_duration(self, coords: list[float]) -> float:
+        spacing = coords[1] - coords[0]
+        accel = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
+        return bang_bang_duration(spacing, accel)
+
+    @staticmethod
+    def _channel(
+        current: tuple[float, float],
+        target: tuple[float, float],
+    ) -> RIPAChannel:
+        if current[1] == target[1]:
+            return "row"
+        if current[0] == target[0]:
+            return "col"
+        raise ValueError(f"RIPA hop must be axis-aligned: {current} -> {target}")
+
+
 SCHEDULERS = {
     "AOD H rotation": AODHadamardPatchRotationScheduler,
+    "RIPA ring manual": ManualRIPAHadamardPatchRotationScheduler,
 }
 
 
