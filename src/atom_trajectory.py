@@ -30,6 +30,22 @@ from .segments import Segment, make_hold
 _TIME_TOL = 1e-12
 
 
+def _axis_of(segment: Segment) -> str | None:
+    """Return ``'x'``/``'y'`` for axis-aligned moves, else ``None``.
+
+    Local helper for the collision walk's breakpoint heuristic. Exposing
+    this on `Segment` would have implied that segments live on a
+    row/column grid, which AOD trajectories do not.
+    """
+    di = segment.end_pos[0] - segment.start_pos[0]
+    dj = segment.end_pos[1] - segment.start_pos[1]
+    if di != 0 and dj == 0:
+        return "x"
+    if dj != 0 and di == 0:
+        return "y"
+    return None
+
+
 # --- collision report and error --------------------------------------------
 
 
@@ -408,12 +424,21 @@ class AtomEnsemble:
     def _path_crossing_times(
         self, a: Segment, b: Segment, t0: float, t1: float
     ) -> list[float]:
-        if a.motion_axis == "x" and b.motion_axis == "y":
+        """Extra breakpoints when both segments are axis-aligned along
+        perpendicular axes (e.g. one RIPA hop along x and another along y).
+        Returns the times each segment hits the other's fixed coordinate.
+        For diagonal AOD or any non-axis-aligned motion this is skipped —
+        the regular fractional breakpoints plus golden-section search are
+        enough to seed the collision walk without the axis assumption.
+        """
+        a_axis = _axis_of(a)
+        b_axis = _axis_of(b)
+        if a_axis == "x" and b_axis == "y":
             return [
                 self._time_for_axis_value(a, b.start_pos[0], 0, t0, t1),
                 self._time_for_axis_value(b, a.start_pos[1], 1, t0, t1),
             ]
-        if a.motion_axis == "y" and b.motion_axis == "x":
+        if a_axis == "y" and b_axis == "x":
             return [
                 self._time_for_axis_value(a, b.start_pos[1], 1, t0, t1),
                 self._time_for_axis_value(b, a.start_pos[0], 0, t0, t1),

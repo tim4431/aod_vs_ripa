@@ -1,165 +1,231 @@
 """Per-segment motion profiles, with absolute timing.
 
-A `Trajectory` is one *timed* segment of a single atom's life. Resting
-positions are float-coordinate trap positions; RIPA callers separately
-constrain their hand-off points to integer grid sites. Segments carry their
-absolute `start_time` so the global timeline of a Sequence can be reconstructed
-by looking at any atom's trajectory list.
+A `Segment` is one *timed* move of a single atom along the straight line
+between `start_pos` and `end_pos`. The temporal shape of the move — how
+much of the path is covered at any local time — is set by a
+`MotionProfile`. That separation mirrors `reference_ramp.RampSequence`:
+the segment fields say *what* line to traverse and over what window; the
+profile says *how* the position interpolates within the window.
 
-The default move profile is a symmetric bang-bang: constant +a_max,
-then -a_max, no coast phase. Fully determined by distance and a_max.
+Profiles are normalized on `s = t_local / duration ∈ [0, 1]` and expose
+analytic first and second derivatives, so callers can read velocity and
+acceleration without finite differences. Bang-bang (symmetric +a / -a)
+is one example; quintic minimum-jerk and arbitrary user polynomials are
+others. Shorter durations yield higher acceleration; the calling Step
+decides whether that is allowed.
+
+There is no row/column assumption baked in here: a segment is defined by
+two endpoints in the float-coordinate trap plane, and AOD-style diagonal
+motion is just as natural as RIPA axis-aligned hops. The optional
+`channel` is metadata (which addressing hardware drove the move) and
+does not constrain geometry.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Callable, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Callable, Literal, Optional, Tuple
 
-# Local-time function: t in [0, duration] -> (i, j) in grid units (float).
-TrajFn = Callable[[float], tuple[float, float]]
-Profile = Callable[[float], float]
-Channel = Literal["row", "col", "aod"]  # 'aod' = AOD synchronous; row/col = RIPA EOM
-Axis = Literal["x", "y"]  # x == i-coordinate, y == j-coordinate
+# 'aod' = AOD synchronous; 'row'/'col' = RIPA EOM channels.
+Channel = Literal["row", "col", "aod"]
 
 
-@dataclass
-class Segment:
-    start_time: float  # absolute global time [s]
-    duration: float  # length of this segment [s]
-    start_pos: tuple[float, float]  # resting trap position in grid units
-    end_pos: tuple[float, float]  # resting trap position in grid units
-    fn: TrajFn  # local-time -> (i, j) float
-    channel: Optional[Channel] = None  # which addressing channel drove the move
-    profile: Optional[Profile] = None  # local-time -> path fraction, when known
-
-    @property
-    def end_time(self) -> float:
-        return self.start_time + self.duration
-
-    @property
-    def delta(self) -> tuple[float, float]:
-        return self.end_pos[0] - self.start_pos[0], self.end_pos[1] - self.start_pos[1]
-
-    @property
-    def is_hold(self) -> bool:
-        return self.start_pos == self.end_pos
-
-    @property
-    def motion_axis(self) -> Axis | None:
-        """Physical axis for single-axis motion.
-
-        Code coordinates are `(i, j)`, where `i` is horizontal (`x`) and
-        `j` is vertical (`y`). Holds and diagonal/AOD moves return `None`.
-        """
-        di, dj = self.delta
-        if di != 0 and dj == 0:
-            return "x"
-        if dj != 0 and di == 0:
-            return "y"
-        return None
-
-    @property
-    def direction(self) -> int:
-        """Direction along `motion_axis`: -1, 0, or +1."""
-        axis = self.motion_axis
-        if axis == "x":
-            return (self.end_pos[0] > self.start_pos[0]) - (
-                self.end_pos[0] < self.start_pos[0]
-            )
-        if axis == "y":
-            return (self.end_pos[1] > self.start_pos[1]) - (
-                self.end_pos[1] < self.start_pos[1]
-            )
-        return 0
-
-    def position_at(self, t_global: float) -> tuple[float, float]:
-        """Sample at a global time. Outside the segment, returns the endpoint."""
-        if t_global <= self.start_time:
-            return (float(self.start_pos[0]), float(self.start_pos[1]))
-        if t_global >= self.end_time:
-            return (float(self.end_pos[0]), float(self.end_pos[1]))
-        return self.fn(t_global - self.start_time)
+# --- normalized motion profiles --------------------------------------------
 
 
-# --- bang-bang helpers -------------------------------------------------------
+@dataclass(frozen=True)
+class MotionProfile:
+    """Normalized motion shape `u(s)` on `s ∈ [0, 1]` with analytic derivatives.
+
+    `value(s)` is the fraction in `[0, 1]` of the straight-line path covered
+    at normalized time `s = t_local / duration`. `derivative(s)` and
+    `second_derivative(s)` are `du/ds` and `d²u/ds²` — the segment scales
+    them by `length / duration` and `length / duration²` to recover physical
+    velocity and acceleration, so callers do not need finite differences.
+
+    Endpoint requirement: `value(0) ≈ 0` and `value(1) ≈ 1` so the segment
+    matches its declared `start_pos` and `end_pos`. `name` is for diagnostics.
+    """
+
+    value: Callable[[float], float]
+    derivative: Callable[[float], float]
+    second_derivative: Callable[[float], float]
+    name: str = "profile"
+
+
+def _bang_bang_value(s: float) -> float:
+    if s <= 0.5:
+        return 2.0 * s * s
+    return 1.0 - 2.0 * (1.0 - s) ** 2
+
+
+def _bang_bang_derivative(s: float) -> float:
+    if s <= 0.5:
+        return 4.0 * s
+    return 4.0 * (1.0 - s)
+
+
+def _bang_bang_second_derivative(s: float) -> float:
+    return 4.0 if s <= 0.5 else -4.0
+
+
+BANG_BANG = MotionProfile(
+    value=_bang_bang_value,
+    derivative=_bang_bang_derivative,
+    second_derivative=_bang_bang_second_derivative,
+    name="bang_bang",
+)
+
+
+def polynomial_profile(
+    coefficients: Tuple[float, ...], name: str = "polynomial"
+) -> MotionProfile:
+    """Build a `MotionProfile` from polynomial coefficients on `s ∈ [0, 1]`.
+
+    `coefficients = (a_0, a_1, ..., a_n)` defines `u(s) = Σ a_n · s^n`. Pick
+    `a_0 = 0` and coefficients summing to `1` so the profile satisfies
+    `u(0) = 0` and `u(1) = 1`. `LINEAR` and `QUINTIC_MIN_JERK` below are
+    standard members of this family.
+    """
+    coeffs = tuple(float(c) for c in coefficients)
+
+    def value(s: float, _c=coeffs) -> float:
+        result = 0.0
+        sn = 1.0
+        for a in _c:
+            result += a * sn
+            sn *= s
+        return result
+
+    def derivative(s: float, _c=coeffs) -> float:
+        result = 0.0
+        for n in range(1, len(_c)):
+            result += n * _c[n] * s ** (n - 1)
+        return result
+
+    def second_derivative(s: float, _c=coeffs) -> float:
+        result = 0.0
+        for n in range(2, len(_c)):
+            result += n * (n - 1) * _c[n] * s ** (n - 2)
+        return result
+
+    return MotionProfile(value, derivative, second_derivative, name)
+
+
+LINEAR = polynomial_profile((0.0, 1.0), "linear")
+QUINTIC_MIN_JERK = polynomial_profile(
+    (0.0, 0.0, 0.0, 10.0, -15.0, 6.0), "quintic_min_jerk"
+)
+
+
+# --- bang-bang helpers ------------------------------------------------------
 
 
 def bang_bang_duration(distance: float, accel: float) -> float:
-    """Time for a symmetric +a/-a profile (no coast) to traverse `distance`.
+    """Time for a symmetric +a / -a profile (no coast) to traverse `distance`.
 
-    distance = 2 * (1/2 a (T/2)^2)  =>  T = 2 sqrt(distance / accel).
-
-    `accel` is the *actual* acceleration to run at — not necessarily the
-    hardware ceiling. Schedulers can slow a move below `a_max` whenever
-    they have a reason to (e.g. matching a shared duration across atoms,
-    or honoring a heating budget).
+    `distance = 2 · ½ · a · (T/2)²  =>  T = 2 √(distance / a)`. `accel` is
+    the *actual* acceleration to run at — not necessarily the hardware
+    ceiling. Schedulers can slow a move below `a_max` whenever they have a
+    reason to (e.g. matching a shared duration across atoms, honoring a
+    heating budget, or pacing a convoy by ∆t).
     """
     if distance <= 0:
         return 0.0
     return 2.0 * math.sqrt(distance / accel)
 
 
-# --- general segment wrapper -------------------------------------------------
+# --- the segment -----------------------------------------------------------
 
-# Normalized temporal profile: t_local in [0, duration] -> u in [0, 1] giving
-# the fraction of the straight-line path from start to end that has been
-# covered. profile(0) should be ~0 and profile(duration) should be ~1.
 
-def make_segment(
-    start: tuple[float, float],
-    end: tuple[float, float],
-    start_time: float,
-    duration: float,
-    profile: Profile,
-    *,
-    channel: Optional[Channel] = None,
-) -> Segment:
-    """General segment with an arbitrary temporal profile.
+@dataclass
+class Segment:
+    """One timed atom move along the straight line `start_pos -> end_pos`.
 
-    The atom moves along the straight line from `start` to `end`. The
-    *temporal* shape of the move — how the position maps to time — is
-    given by `profile(t_local) -> u in [0, 1]`. Acceleration is free
-    to vary within the segment (jerk-limited curves, optical-conveyor
-    sweeps, multi-stage profiles, etc.) as long as profile(0) ≈ 0 and
-    profile(duration) ≈ 1.
+    The endpoints are float-coordinate trap positions; AOD segments may
+    take any direction, RIPA callers separately constrain their endpoints
+    to integer grid sites. `channel` is metadata describing which
+    addressing hardware drove the move; it does not constrain geometry.
 
-    For the common bang-bang case use `make_const_acc_segment`.
+    `profile` controls the temporal shape: see `MotionProfile`. The default
+    is `BANG_BANG`. `make_const_acc_segment` is a convenience for the
+    bang-bang case; constructors needing other shapes pass `profile`
+    directly.
     """
-    di = end[0] - start[0]
-    dj = end[1] - start[1]
-    s_pos = (_clean_coord(start[0]), _clean_coord(start[1]))
-    e_pos = (_clean_coord(end[0]), _clean_coord(end[1]))
 
-    def fn(t: float, _di=di, _dj=dj, _s=s_pos, _p=profile) -> tuple[float, float]:
-        u = _p(t)
-        return _s[0] + u * _di, _s[1] + u * _dj
+    start_time: float
+    duration: float
+    start_pos: tuple[float, float]
+    end_pos: tuple[float, float]
+    profile: MotionProfile = field(default=BANG_BANG)
+    channel: Optional[Channel] = None
 
-    return Segment(
-        start_time=start_time,
-        duration=duration,
-        start_pos=s_pos,
-        end_pos=e_pos,
-        fn=fn,
-        channel=channel,
-        profile=profile,
-    )
+    @property
+    def end_time(self) -> float:
+        return self.start_time + self.duration
+
+    @property
+    def length(self) -> float:
+        return math.hypot(
+            self.end_pos[0] - self.start_pos[0],
+            self.end_pos[1] - self.start_pos[1],
+        )
+
+    def position_at(self, t_global: float) -> tuple[float, float]:
+        """Sample at a global time. Outside the segment, returns the endpoint."""
+        u = self.path_fraction_at(t_global)
+        return (
+            self.start_pos[0] + u * (self.end_pos[0] - self.start_pos[0]),
+            self.start_pos[1] + u * (self.end_pos[1] - self.start_pos[1]),
+        )
+
+    def velocity_at(self, t_global: float) -> tuple[float, float]:
+        """Velocity in grid units / s at global time `t_global`. Zero outside."""
+        if (
+            self.duration <= 0
+            or t_global <= self.start_time
+            or t_global >= self.end_time
+        ):
+            return (0.0, 0.0)
+        s = (t_global - self.start_time) / self.duration
+        rate = float(self.profile.derivative(s)) / self.duration
+        return (
+            rate * (self.end_pos[0] - self.start_pos[0]),
+            rate * (self.end_pos[1] - self.start_pos[1]),
+        )
+
+    def acceleration_at(self, t_global: float) -> tuple[float, float]:
+        """Acceleration in grid units / s² at global time `t_global`. Zero outside."""
+        if (
+            self.duration <= 0
+            or t_global <= self.start_time
+            or t_global >= self.end_time
+        ):
+            return (0.0, 0.0)
+        s = (t_global - self.start_time) / self.duration
+        curvature = float(self.profile.second_derivative(s)) / (self.duration ** 2)
+        return (
+            curvature * (self.end_pos[0] - self.start_pos[0]),
+            curvature * (self.end_pos[1] - self.start_pos[1]),
+        )
+
+    def path_fraction_at(self, t_global: float) -> float:
+        """Fraction of the path covered at global time `t_global`, clamped to `[0, 1]`."""
+        if t_global <= self.start_time:
+            return 0.0
+        if self.duration <= 0 or t_global >= self.end_time:
+            return 1.0
+        s = (t_global - self.start_time) / self.duration
+        u = float(self.profile.value(s))
+        if u < 0.0:
+            return 0.0
+        if u > 1.0:
+            return 1.0
+        return u
 
 
-# --- bang-bang specialization -----------------------------------------------
-
-def _bang_bang_profile(t_local: float, T: float) -> float:
-    """Normalized bang-bang profile: 0 at t=0, 1 at t=T, smooth at t=T/2.
-
-    Derived from constant +a then -a with a = 4L/T^2. Independent of L
-    because the profile is normalized (returns a fraction).
-    """
-    if T <= 0:
-        return 1.0
-    half = T / 2.0
-    if t_local <= half:
-        return 2.0 * (t_local / T) ** 2
-    return 1.0 - 2.0 * ((T - t_local) / T) ** 2
+# --- builders --------------------------------------------------------------
 
 
 def make_const_acc_segment(
@@ -171,29 +237,30 @@ def make_const_acc_segment(
     duration: Optional[float] = None,
     channel: Optional[Channel] = None,
 ) -> Segment:
-    """Bang-bang (symmetric +a / -a) segment, the common-case wrapper.
+    """Bang-bang segment, the common-case wrapper.
 
     Provide *exactly one* of:
-      * `accel` — the acceleration to run at; duration falls out as
-        bang-bang(L, accel). Use this for "as fast as this accel allows".
-      * `duration` — the window the move must occupy; implied acceleration
-        is 4 * L / duration^2 (used when sharing a window across atoms,
-        e.g. AOD lattice ops; shorter moves run at less than a_max).
+      * `accel` — run the move as fast as that acceleration allows; the
+        duration falls out as `bang_bang_duration(L, accel)`.
+      * `duration` — fix the time window (e.g. matching a shared AOD
+        window or pacing a convoy by ∆t); the implied acceleration is
+        `4 · L / duration²`, which is below `a_max` for longer windows.
 
-    What acceleration the hardware allows is the calling Step's concern,
-    not the segment's — neither parameter here is intrinsically "max".
+    Whether a given acceleration is hardware-realizable is the calling
+    Step's concern, not this builder's; both forms accept any positive
+    number.
     """
     if (accel is None) == (duration is None):
         raise ValueError("provide exactly one of `accel` or `duration`")
 
-    di = end[0] - start[0]
-    dj = end[1] - start[1]
-    L = math.hypot(di, dj)
-    T = bang_bang_duration(L, accel) if duration is None else duration
-
-    return make_segment(
-        start, end, start_time, T,
-        lambda t, _T=T: _bang_bang_profile(t, _T),
+    L = math.hypot(end[0] - start[0], end[1] - start[1])
+    T = bang_bang_duration(L, accel) if duration is None else float(duration)
+    return Segment(
+        start_time=float(start_time),
+        duration=T,
+        start_pos=(_clean_coord(start[0]), _clean_coord(start[1])),
+        end_pos=(_clean_coord(end[0]), _clean_coord(end[1])),
+        profile=BANG_BANG,
         channel=channel,
     )
 
@@ -208,11 +275,11 @@ def make_hold(
     """Stay-put segment. Useful for forced waits."""
     p = (_clean_coord(pos[0]), _clean_coord(pos[1]))
     return Segment(
-        start_time=start_time,
-        duration=duration,
+        start_time=float(start_time),
+        duration=float(duration),
         start_pos=p,
         end_pos=p,
-        fn=lambda t, _p=p: (float(_p[0]), float(_p[1])),
+        profile=BANG_BANG,
         channel=channel,
     )
 

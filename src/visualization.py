@@ -39,7 +39,7 @@ from tqdm.auto import tqdm  # noqa: E402
 
 from .atom_config import Grid  # noqa: E402
 from .atom_trajectory import AtomEnsemble, AtomTrajectory  # noqa: E402
-from .segments import Segment  # noqa: E402
+from .segments import BANG_BANG, Segment  # noqa: E402
 
 ToneChannel = Literal["row", "col"]
 ToneHardware = Literal["AOD", "EOM", "AOD/EOM", "tone"]
@@ -798,7 +798,8 @@ def _active_aod_traps_xy(
         duration = float(end_time - start_time)
         if duration <= 0 or not (start_time - tol <= t < end_time - tol):
             continue
-        u = _bang_bang_fraction(float(t - start_time), duration)
+        s = max(0.0, min(1.0, float(t - start_time) / duration))
+        u = float(BANG_BANG.value(s))
         coords_1 = [
             float(old) + u * (float(new) - float(old))
             for old, new in zip(selected_axis_1, new_axis_1)
@@ -822,17 +823,6 @@ def _active_aod_traps_xy(
     if not traps:
         return np.empty((0, 2), dtype=float)
     return ensemble.grid.ij_to_xy(np.asarray(traps, dtype=float))
-
-
-def _bang_bang_fraction(t_local: float, duration: float) -> float:
-    """Path fraction in [0, 1] for a symmetric bang-bang move at local time `t_local`."""
-    if duration <= 0:
-        return 1.0
-    t = min(max(float(t_local), 0.0), float(duration))
-    half = duration / 2.0
-    if t <= half:
-        return 2.0 * (t / duration) ** 2
-    return 1.0 - 2.0 * ((duration - t) / duration) ** 2
 
 
 def _sample_segment_xy(
@@ -864,7 +854,7 @@ def _motion_blur_xy(grid: Grid, seg: Segment, t: float, samples: int) -> np.ndar
         return np.empty((0, 2), dtype=float)
 
     shutter = 0.18 * seg.duration
-    current_fraction = _segment_path_fraction(seg, t_now)
+    current_fraction = seg.path_fraction_at(t_now)
     current_distance = current_fraction * total_distance
     blur_distance = min(speed * shutter, current_distance, 0.45 * total_distance)
     if blur_distance <= 1e-12:
@@ -876,30 +866,9 @@ def _motion_blur_xy(grid: Grid, seg: Segment, t: float, samples: int) -> np.ndar
 
 
 def _segment_speed_grid(seg: Segment, t: float) -> float:
-    """Numerically estimate the segment's instantaneous speed in grid units per second."""
-    eps = min(max(seg.duration * 1e-3, 1e-12), 1e-6)
-    t0 = max(seg.start_time, t - eps)
-    t1 = min(seg.end_time, t + eps)
-    if t1 <= t0:
-        return 0.0
-    p0 = seg.position_at(t0)
-    p1 = seg.position_at(t1)
-    return math.hypot(p1[0] - p0[0], p1[1] - p0[1]) / (t1 - t0)
-
-
-def _segment_path_fraction(seg: Segment, t: float) -> float:
-    """Return how far along the segment's path the atom is at absolute time `t`, in [0, 1]."""
-    if seg.profile is not None:
-        return min(max(float(seg.profile(t - seg.start_time)), 0.0), 1.0)
-
-    di = seg.end_pos[0] - seg.start_pos[0]
-    dj = seg.end_pos[1] - seg.start_pos[1]
-    length2 = di * di + dj * dj
-    if length2 <= 0:
-        return 1.0
-    pos = seg.position_at(t)
-    u = ((pos[0] - seg.start_pos[0]) * di + (pos[1] - seg.start_pos[1]) * dj) / length2
-    return min(max(float(u), 0.0), 1.0)
+    """Instantaneous speed in grid units per second from the segment's analytic velocity."""
+    vx, vy = seg.velocity_at(t)
+    return math.hypot(vx, vy)
 
 
 def _time_for_path_fraction(
@@ -909,13 +878,13 @@ def _time_for_path_fraction(
     fraction = min(max(float(fraction), 0.0), 1.0)
     if fraction <= 0.0:
         return seg.start_time
-    if fraction >= _segment_path_fraction(seg, hi):
+    if fraction >= seg.path_fraction_at(hi):
         return hi
     left = max(seg.start_time, lo)
     right = min(seg.end_time, hi)
     for _ in range(48):
         mid = (left + right) / 2.0
-        if _segment_path_fraction(seg, mid) < fraction:
+        if seg.path_fraction_at(mid) < fraction:
             left = mid
         else:
             right = mid

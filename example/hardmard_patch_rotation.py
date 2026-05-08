@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 from src.atom_config import Grid
 from src.benchmark import benchmark_schedulers, format_benchmark_table
-from src.atom_trajectory import AtomEnsemble
+from src.atom_trajectory import AtomEnsemble, CollisionError, CollisionReport
 from src.movement import PHYS_A_MAX, Step, grid_accel_from_phys
 from src.routing import RoutingRequest, centered_storage_square
 from src.scheduler.aod_1d_projected import AODProjection, unit_vector
@@ -42,7 +42,7 @@ from src.scheduler.logL_1d.aod_logL_1d import (
     AODLogL1DBroadcastLineScheduler,
     AODLogL1DPerLineScheduler,
 )
-from src.segments import bang_bang_duration, make_const_acc_segment
+from src.segments import Segment, bang_bang_duration, make_const_acc_segment
 from src.visualization import render_animation
 
 N = 24
@@ -53,7 +53,10 @@ COLLISION_RADIUS_UM = 4.0
 
 PREFIX = "hardmard_patch_rotation"
 RIPAChannel = Literal["row", "col"]
-RIPABatchMove = tuple[int, tuple[float, float], RIPAChannel]
+
+
+RIPALeg = tuple[tuple[float, float], tuple[float, float], RIPAChannel, float]
+# (start_pos, end_pos, channel, duration) — one straight bang-bang leg.
 
 
 def scaled_unit_vector(theta: float, scale: float) -> tuple[float, float]:
@@ -75,62 +78,141 @@ ANTI_DIAGONAL_PROJECTION = AODProjection(
 )
 
 
+RIPATrajectory = tuple[int, tuple[RIPALeg, ...]]
+# (atom_id, legs) — one atom's continuous multi-leg trajectory.
+
+
 @dataclass
-class RIPABatchStep(Step):
-    """Manual same-start batch of independent RIPA moves."""
+class BatchedRingTrajectoryStep(Step):
+    """All-atoms multi-leg trajectories applied as one atomic batch.
+
+    Every atom in the layer crosses up to one corner, so its trajectory
+    is one or two bang-bang legs joined back-to-back with no rest at
+    intermediate grid points or at corners. The standard incremental
+    validator can't see "atom k will move out of slot S before atom j
+    arrives" because atoms not yet committed look like obstacles, so this
+    step (mirroring `RIPACCBSCScheduler`'s commit-then-check pattern)
+    commits every atom's segments and runs a single full-timeline
+    pairwise collision pass; it rolls everything back on failure.
+    """
 
     start_time: float
-    moves: tuple[RIPABatchMove, ...]
+    trajectories: tuple[RIPATrajectory, ...]
 
     def apply(self, ensemble: AtomEnsemble) -> None:
-        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
-        segments = []
-        for atom_id, target, channel in self.moves:
-            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
-                self.start_time
-            )
-            self._check_channel(current, target, channel)
-            if current == target:
-                continue
-            segments.append((
-                atom_id,
-                make_const_acc_segment(
-                    current,
-                    target,
-                    self.start_time,
-                    accel=accel,
-                    channel=channel,
-                ),
-            ))
-        ensemble.append_segments_batch(segments)
+        by_atom = self._build_segments_by_atom()
+        self._check_continuity(ensemble, by_atom)
+        old_lengths = {
+            atom.atom_id: len(atom.segments) for atom in ensemble.atomtrajs
+        }
+        try:
+            for atom_id, segs in by_atom.items():
+                ensemble.atomtraj_by_id(atom_id).segments.extend(segs)
+            report = _check_full_timeline(ensemble)
+            if not report.ok:
+                raise CollisionError(report)
+        except Exception:
+            for atom in ensemble.atomtrajs:
+                del atom.segments[old_lengths[atom.atom_id]:]
+            raise
 
     def end_time(self, ensemble: AtomEnsemble) -> float:
-        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
-        duration = 0.0
-        for atom_id, target, channel in self.moves:
-            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
-                self.start_time
-            )
-            self._check_channel(current, target, channel)
-            duration = max(
-                duration,
-                bang_bang_duration(
-                    math.hypot(target[0] - current[0], target[1] - current[1]),
-                    accel,
-                ),
-            )
-        return self.start_time + duration
+        return self.start_time + max(
+            (
+                sum(duration for _, _, _, duration in legs)
+                for _, legs in self.trajectories
+            ),
+            default=0.0,
+        )
+
+    def _build_segments_by_atom(self) -> dict[int, list[Segment]]:
+        by_atom: dict[int, list[Segment]] = {}
+        for atom_id, legs in self.trajectories:
+            t = self.start_time
+            segs: list[Segment] = []
+            for start_pos, end_pos, channel, duration in legs:
+                self._check_channel(start_pos, end_pos, channel)
+                segs.append(make_const_acc_segment(
+                    start_pos, end_pos, t,
+                    duration=duration, channel=channel,
+                ))
+                t += duration
+            by_atom[atom_id] = segs
+        return by_atom
+
+    @staticmethod
+    def _check_continuity(
+        ensemble: AtomEnsemble,
+        by_atom: dict[int, list[Segment]],
+    ) -> None:
+        for atom_id, segs in by_atom.items():
+            atom = ensemble.atomtraj_by_id(atom_id)
+            prev_pos = atom.final_pos
+            prev_time = atom.final_time
+            for seg in segs:
+                if seg.start_pos != prev_pos:
+                    raise ValueError(
+                        f"atom {atom_id}: segment starts at {seg.start_pos} "
+                        f"but atom is at {prev_pos}"
+                    )
+                if seg.start_time + 1e-12 < prev_time:
+                    raise ValueError(
+                        f"atom {atom_id}: segment starts at t={seg.start_time} "
+                        f"before previous segment ends at t={prev_time}"
+                    )
+                prev_pos = seg.end_pos
+                prev_time = seg.end_time
 
     @staticmethod
     def _check_channel(
-        current: tuple[float, float],
-        target: tuple[float, float],
+        start_pos: tuple[float, float],
+        end_pos: tuple[float, float],
         channel: RIPAChannel,
     ) -> None:
-        if channel == "row" and current[1] != target[1]:
-            raise ValueError(f"row-channel RIPA move must keep j fixed: {current}->{target}")
-        if channel == "col" and current[0] != target[0]:
-            raise ValueError(f"col-channel RIPA move must keep i fixed: {current}->{target}")
+        if channel == "row" and start_pos[1] != end_pos[1]:
+            raise ValueError(f"row-channel RIPA move must keep j fixed: {start_pos}->{end_pos}")
+        if channel == "col" and start_pos[0] != end_pos[0]:
+            raise ValueError(f"col-channel RIPA move must keep i fixed: {start_pos}->{end_pos}")
+
+
+def _check_full_timeline(ensemble: AtomEnsemble) -> CollisionReport:
+    """O(N²) pairwise collision pass over the whole ensemble timeline.
+
+    Mirrors the helper inside `RIPACCBSCScheduler`: the incremental
+    validator only catches conflicts as they're added, but a batched
+    multi-segment commit needs one final cross-atom check across all
+    timelines after every atom's segments have been spliced in.
+    """
+    rc_grid = ensemble.grid.rc / ensemble.grid.d
+    horizon = ensemble.total_duration()
+    worst_grid = math.inf
+    worst_pair: tuple[int, int, float] | None = None
+    atoms = ensemble.atomtrajs
+    for idx, atom_a in enumerate(atoms):
+        for atom_b in atoms[idx + 1:]:
+            for seg_a in atom_a.timeline_segments(0.0, horizon):
+                if seg_a.duration <= 0:
+                    continue
+                for seg_b in atom_b.timeline_segments(seg_a.start_time, seg_a.end_time):
+                    t0 = max(seg_a.start_time, seg_b.start_time)
+                    t1 = min(seg_a.end_time, seg_b.end_time)
+                    if t1 < t0 - 1e-12:
+                        continue
+                    d_grid, t = ensemble._distance_between_segments(
+                        seg_a, seg_b, t0, t1, rc_grid,
+                    )
+                    if d_grid < worst_grid:
+                        worst_grid = d_grid
+                        worst_pair = (
+                            int(atom_a.atom_id),
+                            int(atom_b.atom_id),
+                            float(t),
+                        )
+    return CollisionReport(
+        ok=worst_grid * ensemble.grid.d + 1e-12 >= ensemble.grid.rc,
+        worst_pair=worst_pair,
+        worst_distance=worst_grid * ensemble.grid.d,
+    )
 
 
 def hadamard_rotation_targets(src):
@@ -210,54 +292,139 @@ class AODHadamardPatchRotationScheduler(SyncScheduler):
 
 @dataclass
 class ManualRIPAHadamardPatchRotationScheduler(AsyncScheduler):
-    """Manual RIPA square-ring rotation for the 5x5 Hadamard patch.
+    """Manual RIPA square-ring rotation with continuous corner-to-corner flow.
 
-    Each layer is an independent perimeter convoy. One RIPA hop advances every
-    atom on that perimeter to the next storage site, and repeating this by the
-    side length minus one realizes the 90-degree rotation. Distinct layers use
-    independent timelines and can run simultaneously.
+    Each atom walks its full perimeter share in one go: bang-bang per
+    axis-aligned leg, joined back-to-back with no rest at intermediate
+    grid points and no rest at corners. Within a ring layer, every atom
+    shares one common total time `T_layer` — set by the most-balanced
+    two-leg split (the slowest natural trajectory at `a_max`) — by
+    spreading sub-max bang-bang acceleration across its legs
+    (``a_atom = (2·Σ √Lᵢ / T_layer)²``). Equal total times preserve the
+    rigid spatial relationship between atoms throughout the rotation, so
+    the only "deceleration to a grid point" happens once at each atom's
+    final destination. Outer and inner rings run in parallel.
     """
 
     def _plan(self) -> None:
         coords = self._validate_square_patch()
+        accel_max = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
         atom_id_by_site = {
             tuple(site): atom_id for atom_id, site in enumerate(self.request.src)
         }
-        hop_duration = self._hop_duration(coords)
 
         for layer in range(len(coords) // 2):
             ring = self._ring_positions(coords, layer)
+            ring_len = len(ring)
             shifts = len(coords) - 1 - 2 * layer
-            self._append_ring_rotation(
-                ring,
-                shifts,
-                atom_id_by_site,
-                hop_duration,
-            )
+            if ring_len == 0 or shifts == 0:
+                continue
+            self._append_ring_rotation(ring, shifts, atom_id_by_site, accel_max)
+
+    corner_safety: float = 1.10
+    """Multiplier on the geometric corner-clearance time `Δt = 2·√(2·rc/a)`.
+    Must be ≥ 1; larger values widen the per-corner gap for safety."""
 
     def _append_ring_rotation(
         self,
         ring: list[tuple[float, float]],
         shifts: int,
         atom_id_by_site: dict[tuple[float, float], int],
-        hop_duration: float,
+        accel_max: float,
     ) -> None:
         ring_len = len(ring)
-        for shift in range(shifts):
-            start_time = shift * hop_duration
-            moves: list[RIPABatchMove] = []
-            for source_index, source_site in enumerate(ring):
-                current = ring[(source_index + shift) % ring_len]
-                target = ring[(source_index + shift + 1) % ring_len]
-                moves.append((
-                    atom_id_by_site[source_site],
-                    target,
-                    self._channel(current, target),
+        spacing = math.hypot(
+            ring[1][0] - ring[0][0], ring[1][1] - ring[0][1]
+        )
+        T_shift = bang_bang_duration(spacing, accel_max)
+        rc_grid = self.request.grid.rc / self.request.grid.d
+        # `Δt = 2·√(2·rc/a)`: time for a freshly-arrived atom to clear the
+        # corner by `rc` while accelerating from rest in the new
+        # direction, plus the symmetric time for the *next* atom to
+        # decelerate into the corner from `rc` away. Lockstep used the
+        # full `T_shift` here, but the geometric minimum is much smaller
+        # (≈0.63·T_shift at rc=0.8·spacing).
+        delta_corner = self.corner_safety * 2.0 * math.sqrt(
+            2.0 * rc_grid / accel_max
+        )
+
+        trajectories: list[RIPATrajectory] = []
+        for source_index in range(ring_len):
+            atom_id = atom_id_by_site[ring[source_index]]
+            path = [
+                ring[(source_index + h) % ring_len] for h in range(shifts + 1)
+            ]
+            legs = self._compress_legs(path)
+            n_legs = len(legs)
+            step_legs: list[RIPALeg] = []
+            for leg_idx, (start_pos, end_pos) in enumerate(legs):
+                distance = math.hypot(
+                    end_pos[0] - start_pos[0], end_pos[1] - start_pos[1]
+                )
+                if distance == 0:
+                    continue
+                slot_count = round(distance / spacing)
+                # Two cases for a leg's duration:
+                #
+                # (a) Leg ends *at a corner* (leg 1 of a multi-leg atom,
+                #     or the single leg of a corner-only atom). The end
+                #     corner is shared with up to `slot_count` other
+                #     atoms threading it from this edge, so the leg's
+                #     end time must be at least `T_shift + (slot_count -
+                #     1)·Δt_corner` to keep them rc-separated as they
+                #     enter the corner one after the other. Lockstep used
+                #     `slot_count·T_shift` here — strictly larger.
+                #
+                # (b) Leg ends *mid-edge* (leg 2 of a multi-leg atom).
+                #     Nothing constrains its end time beyond the
+                #     hardware ceiling, so just bang-bang at `a_max`.
+                ends_at_corner = (n_legs == 1) or (leg_idx < n_legs - 1)
+                if ends_at_corner:
+                    duration = max(
+                        bang_bang_duration(distance, accel_max),
+                        T_shift + (slot_count - 1) * delta_corner,
+                    )
+                else:
+                    duration = bang_bang_duration(distance, accel_max)
+                step_legs.append((
+                    start_pos,
+                    end_pos,
+                    self._channel(start_pos, end_pos),
+                    duration,
                 ))
-            self.append_step(RIPABatchStep(
-                start_time=start_time,
-                moves=tuple(moves),
+            if step_legs:
+                trajectories.append((atom_id, tuple(step_legs)))
+
+        if trajectories:
+            self.append_step(BatchedRingTrajectoryStep(
+                start_time=0.0,
+                trajectories=tuple(trajectories),
             ))
+
+    @staticmethod
+    def _compress_legs(
+        path: list[tuple[float, float]],
+    ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Collapse consecutive same-axis hops in `path` into one leg each."""
+        legs: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        leg_start = path[0]
+        prev_axis: str | None = None
+        for k in range(1, len(path)):
+            cur, nxt = path[k - 1], path[k]
+            if cur == nxt:
+                continue
+            if cur[0] == nxt[0]:
+                axis = "j"
+            elif cur[1] == nxt[1]:
+                axis = "i"
+            else:
+                raise ValueError(f"non-axis-aligned hop: {cur}->{nxt}")
+            if prev_axis is not None and axis != prev_axis:
+                legs.append((leg_start, path[k - 1]))
+                leg_start = path[k - 1]
+            prev_axis = axis
+        legs.append((leg_start, path[-1]))
+        return legs
 
     def _validate_square_patch(self) -> list[float]:
         coords = sorted({i for i, _ in self.request.src})
@@ -294,11 +461,6 @@ class ManualRIPAHadamardPatchRotationScheduler(AsyncScheduler):
             + [(i, lo) for i in reversed(vals[1:-1])]
         )
 
-    def _hop_duration(self, coords: list[float]) -> float:
-        spacing = coords[1] - coords[0]
-        accel = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
-        return bang_bang_duration(spacing, accel)
-
     @staticmethod
     def _channel(
         current: tuple[float, float],
@@ -311,8 +473,108 @@ class ManualRIPAHadamardPatchRotationScheduler(AsyncScheduler):
         raise ValueError(f"RIPA hop must be axis-aligned: {current} -> {target}")
 
 
+RIPALockstepMove = tuple[int, tuple[float, float], RIPAChannel]
+# (atom_id, target, channel) — one max-accel one-slot RIPA hop in a lockstep batch.
+
+
+@dataclass
+class LockstepRIPABatchStep(Step):
+    """Same-start batch of one-slot RIPA hops at `a_max`.
+
+    The original 1-hop-per-shift behaviour: every atom moves a single
+    grid step in lockstep, decelerating to rest at the destination.
+    Repeated `shifts` times per ring layer to realize the rotation.
+    """
+
+    start_time: float
+    moves: tuple[RIPALockstepMove, ...]
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
+        segments = []
+        for atom_id, target, channel in self.moves:
+            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
+                self.start_time
+            )
+            BatchedRingTrajectoryStep._check_channel(current, target, channel)
+            if current == target:
+                continue
+            segments.append((
+                atom_id,
+                make_const_acc_segment(
+                    current, target, self.start_time,
+                    accel=accel, channel=channel,
+                ),
+            ))
+        ensemble.append_segments_batch(segments)
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        accel = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
+        duration = 0.0
+        for atom_id, target, channel in self.moves:
+            current = ensemble.atomtraj_by_id(atom_id).resting_position_at(
+                self.start_time
+            )
+            BatchedRingTrajectoryStep._check_channel(current, target, channel)
+            duration = max(
+                duration,
+                bang_bang_duration(
+                    math.hypot(target[0] - current[0], target[1] - current[1]),
+                    accel,
+                ),
+            )
+        return self.start_time + duration
+
+
+@dataclass
+class LockstepRIPAHadamardPatchRotationScheduler(
+    ManualRIPAHadamardPatchRotationScheduler
+):
+    """Per-shift lockstep RIPA rotation — baseline for comparison.
+
+    Each ring layer rotates by `shifts` slot hops; for every shift, all
+    atoms move one perimeter slot in a same-start batch at `a_max`,
+    decelerating to rest at every grid point. Inherits the patch /
+    ring / channel helpers from the continuous-leg scheduler so the two
+    classes solve the same `RoutingRequest` and only differ in *how*
+    they discretize the rotation.
+    """
+
+    def _plan(self) -> None:
+        coords = self._validate_square_patch()
+        accel_max = grid_accel_from_phys(PHYS_A_MAX, self.request.grid.d)
+        spacing = float(coords[1] - coords[0])
+        T_shift = bang_bang_duration(spacing, accel_max)
+        atom_id_by_site = {
+            tuple(site): atom_id for atom_id, site in enumerate(self.request.src)
+        }
+
+        for layer in range(len(coords) // 2):
+            ring = self._ring_positions(coords, layer)
+            shifts = len(coords) - 1 - 2 * layer
+            if not ring or shifts == 0:
+                continue
+            ring_len = len(ring)
+            for shift in range(shifts):
+                start_time = shift * T_shift
+                moves: list[RIPALockstepMove] = []
+                for source_index, source_site in enumerate(ring):
+                    current = ring[(source_index + shift) % ring_len]
+                    target = ring[(source_index + shift + 1) % ring_len]
+                    moves.append((
+                        atom_id_by_site[source_site],
+                        target,
+                        self._channel(current, target),
+                    ))
+                self.append_step(LockstepRIPABatchStep(
+                    start_time=start_time,
+                    moves=tuple(moves),
+                ))
+
+
 SCHEDULERS = {
-    "RIPA rotation": ManualRIPAHadamardPatchRotationScheduler,
+    "RIPA lockstep": LockstepRIPAHadamardPatchRotationScheduler,
+    "RIPA continuous": ManualRIPAHadamardPatchRotationScheduler,
     "AOD H rotation": AODHadamardPatchRotationScheduler,
 }
 
@@ -370,7 +632,7 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=2e3,
+        time_dilation=5e3,
         hold_seconds=1.5,
         atom_colors=patch_rotation_colors(src),
         show_routing_on_start=True,
