@@ -20,6 +20,10 @@ Sequence on a 6x6 grid:
 
     Phase 5 (4t0..5t0): atom 3 (5,2)->(2,2)  row-left
 
+    Phase 6 (5t0..6t0): stationary single-qubit gates
+                       atom 0 at (2,1): Rz, one orange detuning tone
+                       atom 2 at (2,3): Rx, two Raman tones (orange + yellow)
+
 The visualization uses a *time-based* fresh-color rule: atom 3 renders
 in the fresh color only while no segment has yet started for it (the
 parked-reservoir state). The instant the trap engages — i.e., the
@@ -48,7 +52,7 @@ import numpy as np
 from src.atom_config import AtomConfig, Grid
 from src.atom_trajectory import AtomEnsemble
 from src.movement import PHYS_A_MAX, grid_accel_from_phys
-from src.segments import make_smooth_segment, min_jerk_duration
+from src.segments import make_hold, make_smooth_segment, min_jerk_duration
 
 from src.visualization_stack_time import StackTimeStyle, save_stack_time
 
@@ -122,17 +126,29 @@ def main() -> None:
         ),
     )
 
+    # Phase 6: internal single-qubit rotations while atoms are stationary.
+    # They reuse trap rendering by adding hold segments with gate channels:
+    # Rz is one orange tone, Rx is a two-color Raman pair.
+    gate_start = load_start + 2.0 * t0
+    gate_duration = t0
+    ensemble.append_segments_batch([
+        (0, make_hold((2.0, 1.0), gate_start, gate_duration, channel="rz")),
+        (2, make_hold((2.0, 3.0), gate_start, gate_duration, channel="rx")),
+    ])
+
     total = ensemble.total_duration()
     print(
         f"N={N}, atoms=4, t0={t0 * 1e6:.2f} us, "
         f"total={total * 1e6:.2f} us, "
         f"lost_at={lost_at * 1e6:.2f} us, "
-        f"load_start={load_start * 1e6:.2f} us"
+        f"load_start={load_start * 1e6:.2f} us, "
+        f"gate_start={gate_start * 1e6:.2f} us"
     )
 
     # Layer at 3t0 makes the one-cycle delay between loss and load visible;
-    # 4t0 exposes the column-to-row corner of the refill path.
-    t_values = [k * t0 for k in range(6)]
+    # 4t0 exposes the column-to-row corner of the refill path. The final
+    # slab shows the stationary Rz/Rx single-qubit gate pulses.
+    t_values = [k * t0 for k in range(7)]
 
     style = StackTimeStyle(
         figsize=(7.6, 8.6),
@@ -147,7 +163,7 @@ def main() -> None:
         lattice_line_extension_frac=0.7,
         # noticeably translucent layer plane — each layer reads as a plate
         layer_plane_color="#c8d0dc",
-        layer_plane_alpha=0.30,
+        layer_plane_alpha=0.50,
         layer_plane_extension_frac=0.55,
         # small solid in-plane arrows: current move direction at each layer,
         # color-keyed by RIPA row/col channel
@@ -161,6 +177,7 @@ def main() -> None:
         motion_arrow_z_offset=0.08,
         motion_arrow_channel_colors={
             "row": "#ff2828", "col": "#29b0ff",
+            "rz": "#f97316", "rx": "#facc15",
             "aod": "#444444", None: "#444444",
         },
         # atoms: dark blue baseline, fresh (un-addressed) color = yellow
@@ -179,9 +196,11 @@ def main() -> None:
         replacement_connector_lw=1.5,
         replacement_connector_alpha=0.9,
         replacement_connector_dashes=(5.0, 4.0),
-        # trap channels: all moves are RIPA row/col legs
+        # trap/gate channels: RIPA row/col moves plus stationary rotations
         trap_channel_colors={
             "row": "#ff2828", "col": "#29b0ff",
+            "rz": "#f97316",
+            "rx": ("#f97316", "#facc15"),
             "aod": "#888888", None: "#888888",
         },
         trap_ramp_frac=0.30,
@@ -200,8 +219,8 @@ def main() -> None:
         # bottom plate uses the lattice_line_colors above (row/col)
         bottom_grid_lw=1.0,
         bottom_grid_alpha=0.55,
-        bottom_traj_lw=2.0,
-        bottom_traj_alpha=0.85,
+        bottom_traj_lw=1.1,
+        bottom_traj_alpha=0.18,
     )
 
     save_stack_time(

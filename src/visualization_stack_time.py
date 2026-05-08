@@ -29,7 +29,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import to_rgb, to_rgba
+from matplotlib.colors import is_color_like, to_rgb, to_rgba
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers '3d' projection)
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
@@ -164,7 +164,8 @@ class StackTimeStyle:
     replacement_connector_alpha: float = 0.85
     replacement_connector_dashes: tuple[float, float] = (5.0, 4.0)
 
-    # Trap tubes
+    # Trap tubes. `trap_channel_colors` values may be one color or a
+    # sequence of colors; sequences render as simultaneous angular stripes.
     trap_radius_frac: float = 0.30
     trap_max_alpha: float = 0.62
     trap_channel_colors: Mapping[Any, Any] = field(
@@ -243,6 +244,29 @@ def _smoothstep(x: np.ndarray) -> np.ndarray:
 def _darken(color: Any, k: float) -> tuple[float, float, float, float]:
     r, g, b, a = to_rgba(color)
     return (k * r, k * g, k * b, a)
+
+
+def _colorway(color_spec: Any) -> list[Any]:
+    """Return one or more colors from a channel color specification.
+
+    Most channels use a single Matplotlib color. A channel may also provide
+    a sequence of colors, which the trap tube renders as simultaneous angular
+    stripes; this is useful for multi-tone optical gates.
+    """
+    if is_color_like(color_spec):
+        return [color_spec]
+    if isinstance(color_spec, Sequence) and not isinstance(color_spec, (str, bytes)):
+        colors = list(color_spec)
+        if colors and all(is_color_like(c) for c in colors):
+            return colors
+    return [color_spec]
+
+
+def _blend_colorway(color_spec: Any) -> tuple[float, float, float, float]:
+    rgba = np.asarray([to_rgba(c) for c in _colorway(color_spec)], dtype=float)
+    rgb = np.mean(rgba[:, :3], axis=0)
+    alpha = np.max(rgba[:, 3])
+    return (float(rgb[0]), float(rgb[1]), float(rgb[2]), float(alpha))
 
 
 def _draw_loss_cross(
@@ -441,6 +465,7 @@ def _draw_planar_discs(
     edge_lw: float,
     segments: int,
     z_offset: float = 0.0,
+    sort_zpos: float | None = None,
 ) -> None:
     """Draw filled circular polygons parallel to the xy layer plane."""
     if len(centers_xy) == 0:
@@ -469,7 +494,7 @@ def _draw_planar_discs(
     )
     ax.add_collection3d(coll)
     try:
-        coll.set_sort_zpos(z_draw)
+        coll.set_sort_zpos(z_draw if sort_zpos is None else float(sort_zpos))
     except AttributeError:
         pass
 
@@ -529,6 +554,8 @@ def draw_stack_time(
     line_hi = site_hi + s.lattice_line_extension_frac * d
     plane_lo = site_lo - s.layer_plane_extension_frac * d
     plane_hi = site_hi + s.layer_plane_extension_frac * d
+    bottom_plane_lo = min(plane_lo, line_lo)
+    bottom_plane_hi = max(plane_hi, line_hi)
 
     # Auto-expand xy bounds to include any segment endpoints / initial
     # positions that fall outside the lattice (replenishment trajectories
@@ -601,18 +628,31 @@ def draw_stack_time(
 
     def trajectory_channel_rgba(t_mid: float, atom: Any) -> tuple[float, ...]:
         channel = channel_at_time(atom, t_mid)
-        color = s.trap_channel_colors.get(
+        color_spec = s.trap_channel_colors.get(
             channel, s.trap_channel_colors.get(None, "#9a9a9a"),
         )
-        return _darken(color, s.trajectory_darken)
+        return _darken(_blend_colorway(color_spec), s.trajectory_darken)
+
+    bottom_atom_z = max(float(s.atom_plane_z_offset), 1e-6)
+    bottom_grid_z = 0.20 * bottom_atom_z
+    bottom_trap_z = 0.45 * bottom_atom_z
+    bottom_traj_z = 0.70 * bottom_atom_z
+    bottom_marker_z = 1.40 * bottom_atom_z
+    bottom_marker_draws: list[tuple[np.ndarray, float, list[Any], list[Any], float]] = []
 
     # --- bottom plate: row/col-colored extending lattice lines + xy
     #     trajectory projections at z=0. The "grid" on the bottom uses
     #     the same row/col color rule as the layer lattice lines, but
     #     with the bottom-plate styling (alpha, lw).
     if show_bottom_plane:
-        xx = np.array([[plane_lo, plane_hi], [plane_lo, plane_hi]])
-        yy = np.array([[plane_lo, plane_lo], [plane_hi, plane_hi]])
+        xx = np.array(
+            [[bottom_plane_lo, bottom_plane_hi],
+             [bottom_plane_lo, bottom_plane_hi]]
+        )
+        yy = np.array(
+            [[bottom_plane_lo, bottom_plane_lo],
+             [bottom_plane_hi, bottom_plane_hi]]
+        )
         zz = np.zeros_like(xx, dtype=float)
         surf = ax.plot_surface(
             xx, yy, zz,
@@ -638,7 +678,7 @@ def draw_stack_time(
         for jj in range(grid.N):
             y_row = (jj - grid.center) * d
             ax.plot(
-                [line_lo, line_hi], [y_row, y_row], [0, 0],
+                [line_lo, line_hi], [y_row, y_row], [bottom_grid_z, bottom_grid_z],
                 color=bot_row_color, lw=s.bottom_grid_lw,
                 alpha=s.bottom_grid_alpha,
                 solid_capstyle="round",
@@ -646,7 +686,7 @@ def draw_stack_time(
         for ii in range(grid.N):
             x_col = (ii - grid.center) * d
             ax.plot(
-                [x_col, x_col], [line_lo, line_hi], [0, 0],
+                [x_col, x_col], [line_lo, line_hi], [bottom_grid_z, bottom_grid_z],
                 color=bot_col_color, lw=s.bottom_grid_lw,
                 alpha=s.bottom_grid_alpha,
                 solid_capstyle="round",
@@ -668,30 +708,25 @@ def draw_stack_time(
                         seg_hi = atom.lost_at
                 if seg_hi <= seg_lo:
                     continue
-                ts = np.linspace(seg_lo, seg_hi, s.bottom_trap_samples_per_segment)
-                ij = np.asarray(
-                    [seg.position_at(float(tk)) for tk in ts], dtype=float,
-                )
-                xy = grid.ij_to_xy(ij)
-                points = np.stack([xy[:, 0], xy[:, 1], np.zeros(len(ts))], axis=1)
-                segs = np.stack([points[:-1], points[1:]], axis=1)
-                r, g, b, _ = to_rgba(
-                    s.trap_channel_colors.get(
-                        seg.channel, s.trap_channel_colors.get(None, "#9a9a9a"),
-                    )
-                )
-                lc = Line3DCollection(
-                    segs,
-                    colors=[(r, g, b, s.bottom_trap_alpha)] * len(segs),
-                    linewidths=s.bottom_trap_lw,
+                xy = grid.ij_to_xy(np.asarray([
+                    seg.position_at(float(seg_lo)),
+                    seg.position_at(float(seg_hi)),
+                ], dtype=float))
+                if np.hypot(*(xy[1] - xy[0])) <= 1e-12:
+                    continue
+                r, g, b, _ = _blend_colorway(s.trap_channel_colors.get(
+                    seg.channel, s.trap_channel_colors.get(None, "#9a9a9a"),
+                ))
+                line, = ax.plot(
+                    [float(xy[0, 0]), float(xy[1, 0])],
+                    [float(xy[0, 1]), float(xy[1, 1])],
+                    [bottom_trap_z, bottom_trap_z],
+                    color=(r, g, b, s.bottom_trap_alpha),
+                    lw=s.bottom_trap_lw,
+                    solid_capstyle="butt",
                 )
                 try:
-                    lc.set_capstyle("round")
-                except AttributeError:
-                    pass
-                ax.add_collection3d(lc)
-                try:
-                    lc.set_sort_zpos(0.01)
+                    line.set_sort_zpos(bottom_trap_z)
                 except AttributeError:
                     pass
 
@@ -699,64 +734,60 @@ def draw_stack_time(
         fresh_rgba = to_rgba(s.fresh_atom_color)
 
         for idx, atom in enumerate(ensemble.atomtrajs):
-            sample_times = {t_min, t_max}
+            traj_end = t_max if atom.lost_at is None else min(t_max, atom.lost_at)
+            drew_trajectory = False
             for seg in atom.segments:
                 if seg.duration <= 0:
                     continue
                 if seg.end_time < t_min - 1e-15 or seg.start_time > t_max + 1e-15:
                     continue
                 seg_lo = max(seg.start_time, t_min)
-                seg_hi = min(seg.end_time, t_max)
-                sample_times.update(
-                    np.linspace(seg_lo, seg_hi, s.bottom_traj_samples_per_segment)
-                    .tolist()
+                seg_hi = min(seg.end_time, traj_end)
+                if seg_hi <= seg_lo:
+                    continue
+                xy = grid.ij_to_xy(np.asarray([
+                    seg.position_at(float(seg_lo)),
+                    seg.position_at(float(seg_hi)),
+                ], dtype=float))
+                if np.hypot(*(xy[1] - xy[0])) <= 1e-12:
+                    continue
+                t_mid = 0.5 * (float(seg_lo) + float(seg_hi))
+                r, g, b, a = trajectory_channel_rgba(t_mid, atom)
+                line, = ax.plot(
+                    [float(xy[0, 0]), float(xy[1, 0])],
+                    [float(xy[0, 1]), float(xy[1, 1])],
+                    [bottom_traj_z, bottom_traj_z],
+                    color=(r, g, b, a * s.bottom_traj_alpha),
+                    lw=s.bottom_traj_lw,
+                    solid_capstyle="butt",
                 )
-            # truncate the trajectory at the loss event
-            traj_end = t_max if atom.lost_at is None else min(t_max, atom.lost_at)
-            ts = np.asarray(sorted(tk for tk in sample_times if tk <= traj_end + 1e-15))
-            if atom.lost_at is not None:
-                ts = np.append(ts[ts < atom.lost_at - 1e-15], atom.lost_at)
-            if len(ts) < 2:
+                try:
+                    line.set_sort_zpos(bottom_traj_z)
+                except AttributeError:
+                    pass
+                drew_trajectory = True
+
+            if not drew_trajectory:
                 continue
             ij = np.asarray(
-                [atom.position_at(float(tk)) for tk in ts], dtype=float,
+                [atom.position_at(t_min), atom.position_at(traj_end)],
+                dtype=float,
             )
             xy = grid.ij_to_xy(ij)
 
-            # Per-segment color follows the trap row/col/aod palette.
             normal_rgba = to_rgba(colors[idx])
-            points = np.stack([xy[:, 0], xy[:, 1], np.zeros(len(ts))], axis=1)
-            segs = np.stack([points[:-1], points[1:]], axis=1)
-            seg_colors = []
-            for k in range(len(segs)):
-                t_mid = 0.5 * (float(ts[k]) + float(ts[k + 1]))
-                seg_colors.append(trajectory_channel_rgba(t_mid, atom))
-            lc = Line3DCollection(
-                segs, colors=seg_colors,
-                linewidths=s.bottom_traj_lw,
-                alpha=s.bottom_traj_alpha,
-            )
-            ax.add_collection3d(lc)
-            try:
-                lc.set_sort_zpos(0.0)
-            except AttributeError:
-                pass
-
             start_color = (
-                fresh_rgba if _is_fresh_at(atom, float(ts[0])) else normal_rgba
+                fresh_rgba if _is_fresh_at(atom, t_min) else normal_rgba
             )
             if s.atom_disc_mode == "plane":
-                _draw_planar_discs(
-                    ax,
+                bottom_marker_draws.append((
                     xy[0:1],
-                    0.0,
+                    bottom_marker_z,
                     np.sqrt(0.7) * s.atom_radius_frac * d,
                     [to_rgba("white")],
                     [start_color],
                     1.0,
-                    s.atom_disc_segments,
-                    s.atom_plane_z_offset,
-                )
+                ))
             elif s.atom_disc_mode == "screen":
                 ax.scatter(
                     [xy[0, 0]], [xy[0, 1]], [0],
@@ -772,20 +803,17 @@ def draw_stack_time(
                 # position with no extra marker — the in-stack cross is
                 # the single source of truth.
                 end_color = (
-                    fresh_rgba if _is_fresh_at(atom, float(ts[-1])) else normal_rgba
+                    fresh_rgba if _is_fresh_at(atom, traj_end) else normal_rgba
                 )
                 if s.atom_disc_mode == "plane":
-                    _draw_planar_discs(
-                        ax,
+                    bottom_marker_draws.append((
                         xy[-1:],
-                        0.0,
+                        bottom_marker_z,
                         np.sqrt(0.7) * s.atom_radius_frac * d,
                         [end_color],
                         [to_rgba("white")],
                         0.6,
-                        s.atom_disc_segments,
-                        s.atom_plane_z_offset,
-                    )
+                    ))
                 elif s.atom_disc_mode == "screen":
                     ax.scatter(
                         [xy[-1, 0]], [xy[-1, 1]], [0],
@@ -795,6 +823,20 @@ def draw_stack_time(
                     )
                 else:
                     raise ValueError(f"unknown atom_disc_mode={s.atom_disc_mode!r}")
+
+    for centers_xy, z_marker, radius, facecolors, edgecolors, edge_lw in bottom_marker_draws:
+        _draw_planar_discs(
+            ax,
+            centers_xy,
+            z_marker,
+            radius,
+            facecolors,
+            edgecolors,
+            edge_lw,
+            s.atom_disc_segments,
+            0.0,
+            10.0 * s.layer_spacing,
+        )
 
     if show_trap_event_guides and show_traps:
         event_points: list[tuple[float, float, float]] = []
@@ -1158,7 +1200,7 @@ def draw_stack_time(
         )
         _draw_trap_tube(
             ax, xy, zs, wall_alpha, trap_radius,
-            to_rgb(channel_color), s.tube_facets,
+            [to_rgb(c) for c in _colorway(channel_color)], s.tube_facets,
             sort_zpos=float(np.mean(zs)) + 0.04 * s.layer_spacing,
         )
 
@@ -1380,6 +1422,7 @@ def _draw_trap_tube(
     n_along = len(centers_xy)
     if n_along < 2:
         return
+    rgbs = np.asarray(rgb, dtype=float).reshape(-1, 3)
     angles = np.linspace(0.0, 2.0 * np.pi, facets)
     cos_a = np.cos(angles)[None, :]
     sin_a = np.sin(angles)[None, :]
@@ -1391,9 +1434,13 @@ def _draw_trap_tube(
 
     face_alpha = 0.5 * (wall_alpha[:-1] + wall_alpha[1:])
     facecolors = np.zeros((n_along - 1, facets - 1, 4))
-    facecolors[..., 0] = rgb[0]
-    facecolors[..., 1] = rgb[1]
-    facecolors[..., 2] = rgb[2]
+    if len(rgbs) == 1:
+        facecolors[..., 0] = rgbs[0, 0]
+        facecolors[..., 1] = rgbs[0, 1]
+        facecolors[..., 2] = rgbs[0, 2]
+    else:
+        stripe_rgb = rgbs[np.arange(facets - 1) % len(rgbs)]
+        facecolors[..., :3] = stripe_rgb[None, :, :]
     facecolors[..., 3] = face_alpha[:, None]
     surf = ax.plot_surface(
         xs, ys, zs_grid, facecolors=facecolors, shade=False,
