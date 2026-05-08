@@ -47,9 +47,9 @@ from src.visualization import render_animation
 
 N = 24
 PATCH_SIDE = 5
-STORAGE_PERIOD = 4
+STORAGE_PERIOD = 3
 GRID_SPACING_UM = 5.0
-COLLISION_RADIUS_UM = 4.0
+COLLISION_RADIUS_UM = 3.0
 
 PREFIX = "hardmard_patch_rotation"
 RIPAChannel = Literal["row", "col"]
@@ -573,8 +573,8 @@ class LockstepRIPAHadamardPatchRotationScheduler(
 
 
 SCHEDULERS = {
-    "RIPA lockstep": LockstepRIPAHadamardPatchRotationScheduler,
-    "RIPA continuous": ManualRIPAHadamardPatchRotationScheduler,
+    "RIPA synchronous": LockstepRIPAHadamardPatchRotationScheduler,
+    "RIPA asynchronous": ManualRIPAHadamardPatchRotationScheduler,
     "AOD H rotation": AODHadamardPatchRotationScheduler,
 }
 
