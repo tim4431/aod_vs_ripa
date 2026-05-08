@@ -136,6 +136,38 @@ def bang_bang_duration(distance: float, accel: float) -> float:
     return 2.0 * math.sqrt(distance / accel)
 
 
+def min_jerk_duration(distance: float, peak_accel: float) -> float:
+    """Time for a quintic minimum-jerk move to traverse `distance` at
+    peak acceleration `peak_accel`.
+
+    `QUINTIC_MIN_JERK` has `max|u''(s)| = 10/√3 ≈ 5.7735` on `s ∈ [0, 1]`,
+    so peak `|a|` along the path is `(10/√3) · distance / T²`. Solving for
+    `T`: `T = √(10·distance / (√3·peak_accel))`. About 1.20× longer than
+    `bang_bang_duration` at the same peak acceleration — the price of
+    zero velocity and acceleration at both endpoints.
+    """
+    if distance <= 0:
+        return 0.0
+    return math.sqrt(10.0 * distance / (math.sqrt(3.0) * peak_accel))
+
+
+def _profile_peak_accel_coeff(profile: MotionProfile, samples: int = 513) -> float:
+    """Numerically locate `max|u''(s)|` on `s ∈ [0, 1]` for any profile.
+
+    Used by `make_smooth_segment(..., accel=...)` to invert the duration
+    for an arbitrary user-supplied profile. Closed-form coefficients exist
+    for `QUINTIC_MIN_JERK` (`10/√3`) and `BANG_BANG` (`4`), but a generic
+    sampler keeps the builder agnostic to the profile family.
+    """
+    peak = 0.0
+    for k in range(samples):
+        s = k / (samples - 1)
+        v = abs(profile.second_derivative(s))
+        if v > peak:
+            peak = v
+    return peak
+
+
 # --- the segment -----------------------------------------------------------
 
 
@@ -261,6 +293,55 @@ def make_const_acc_segment(
         start_pos=(_clean_coord(start[0]), _clean_coord(start[1])),
         end_pos=(_clean_coord(end[0]), _clean_coord(end[1])),
         profile=BANG_BANG,
+        channel=channel,
+    )
+
+
+def make_smooth_segment(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    start_time: float,
+    *,
+    duration: Optional[float] = None,
+    accel: Optional[float] = None,
+    profile: MotionProfile = QUINTIC_MIN_JERK,
+    channel: Optional[Channel] = None,
+) -> Segment:
+    """Waypoint-style smooth segment: `x(start_time) = start` and
+    `x(start_time + duration) = end`, interpolated by `profile`.
+
+    Mirrors `reference_ramp.RampSequence` semantics — caller specifies
+    the endpoints and timing, a named smooth `profile` carries the shape.
+    The default `QUINTIC_MIN_JERK` has zero velocity AND zero acceleration
+    at both endpoints so successive segments stitch together cleanly,
+    unlike `BANG_BANG` which has a velocity kink at every join.
+
+    Provide *exactly one* of:
+      * `duration` — fix the time window directly. The implied peak
+        acceleration is `max|u''(s)| · L / duration²`.
+      * `accel` — run at this peak acceleration. Duration falls out as
+        `√(max|u''(s)| · L / accel)`. For `QUINTIC_MIN_JERK` this reduces
+        to `min_jerk_duration(L, accel)`.
+    """
+    if (accel is None) == (duration is None):
+        raise ValueError("provide exactly one of `accel` or `duration`")
+
+    L = math.hypot(end[0] - start[0], end[1] - start[1])
+    if duration is None:
+        peak = _profile_peak_accel_coeff(profile)
+        if peak <= 0.0 or L <= 0.0:
+            T = 0.0
+        else:
+            T = math.sqrt(peak * L / accel)
+    else:
+        T = float(duration)
+
+    return Segment(
+        start_time=float(start_time),
+        duration=T,
+        start_pos=(_clean_coord(start[0]), _clean_coord(start[1])),
+        end_pos=(_clean_coord(end[0]), _clean_coord(end[1])),
+        profile=profile,
         channel=channel,
     )
 

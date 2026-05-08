@@ -76,6 +76,16 @@ class AtomTrajectory:
     atom_id: int
     initial_pos: tuple[float, float]  # position at t = 0
     segments: list[Segment] = field(default_factory=list)
+    # Loss state. `lost_at` marks the global time the atom ceases to exist
+    # (drop / heating failure / failed handoff). For `t >= lost_at` the
+    # atom no longer occupies a site; downstream collision and rendering
+    # consult `is_lost_at(t)` rather than removing the trajectory, so the
+    # pre-loss segments remain queryable for diagnostics and visuals.
+    lost_at: float | None = None
+    loss_cause: str | None = None
+
+    def is_lost_at(self, t: float) -> bool:
+        return self.lost_at is not None and t >= self.lost_at - _TIME_TOL
 
     # ---- queries ------------------------------------------------------------
 
@@ -300,6 +310,14 @@ class AtomEnsemble:
             for other in self.atomtrajs:
                 other_id = int(other.atom_id)
                 if other_id == atom_id:
+                    continue
+                # A lost atom no longer occupies a site, so skip it for
+                # collision checks against any candidate that starts at
+                # or after the loss time.
+                if (
+                    other.lost_at is not None
+                    and other.lost_at <= segment.start_time + _TIME_TOL
+                ):
                     continue
 
                 d_grid, t = self._min_distance_to_atom(
@@ -594,6 +612,24 @@ class AtomEnsemble:
         if not rep.ok:
             raise CollisionError(rep)
         atomtraj.segments.append(segment)
+
+    def mark_lost(
+        self, atom_id: int, lost_at: float, *, cause: str | None = None,
+    ) -> None:
+        """Mark `atom_id` as lost at global time `lost_at`.
+
+        Permanent — calling twice on the same atom is an error. Pre-loss
+        segments stay in `segments` (for diagnostics and visuals); future
+        collision checks treat the atom as absent for any candidate whose
+        start_time is at or after `lost_at`.
+        """
+        atomtraj = self.atomtraj_by_id(atom_id)
+        if atomtraj.lost_at is not None:
+            raise ValueError(
+                f"atom {atom_id} already lost at t={atomtraj.lost_at}"
+            )
+        atomtraj.lost_at = float(lost_at)
+        atomtraj.loss_cause = cause
 
     def append_segments_batch(self, segments: list[tuple[int, Segment]]) -> None:
         """Validate then commit multiple same-cycle segments together."""
