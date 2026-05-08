@@ -39,6 +39,7 @@ from tqdm.auto import tqdm  # noqa: E402
 
 from .atom_config import Grid  # noqa: E402
 from .atom_trajectory import AtomEnsemble, AtomTrajectory  # noqa: E402
+from .drawing import Z_COLOR_CODE, draw_color_code_pattern  # noqa: E402, F401
 from .segments import BANG_BANG, Segment  # noqa: E402
 
 ToneChannel = Literal["row", "col"]
@@ -56,7 +57,9 @@ TIME_FACTOR_US = 1e6
 FREQ_LABEL = "nu / FSR1 (mod 1)"
 
 # Render z-order layering, low -> high. Anything painted with a higher
-# zorder draws on top of lower zorder layers.
+# zorder draws on top of lower zorder layers. `Z_COLOR_CODE` lives in
+# `drawing.py` (the pattern itself is defined there) and is re-exported
+# above for callers that want to layer against it.
 Z_GRID_DOTS = 1.0       # background lattice dots
 Z_GRID_FRAME = 1.2      # dashed grid bbox
 Z_PLANNED_PATH = 2.0    # dashed future trajectories
@@ -436,6 +439,8 @@ def draw_atom_panel(
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
+    show_color_code: bool = False,
+    color_code_swap: bool = False,
     title: str | None = None,
 ) -> None:
     """Compose one atom-plane panel by calling the visual primitives in z-order."""
@@ -449,8 +454,18 @@ def draw_atom_panel(
     )
 
     finished = t >= ensemble.total_duration() - 1e-12
-    addressed_style: AddressedStyle = "none" if finished else style.addressed_style
+    # When `color_code_swap` is set, the overlay only fires on a panel
+    # once its own ensemble has finished moving (lets each scheduler
+    # transition into the post-Hadamard state independently). Without
+    # the swap flag (start hold) the un-swapped overlay is drawn on
+    # every panel regardless.
+    draw_overlay = show_color_code and (finished or not color_code_swap)
+    addressed_style: AddressedStyle = (
+        "none" if finished or draw_overlay else style.addressed_style
+    )
 
+    if draw_overlay:
+        draw_color_code_pattern(ax, ensemble, swap_colors=color_code_swap)
     draw_grid_dots(ax, ensemble.grid)
     if show_routing:
         draw_routing_request(ax, ensemble, colors=colors)
@@ -485,6 +500,8 @@ def draw_frame(
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing: bool = False,
+    show_color_code: bool = False,
+    color_code_swap: bool = False,
     title: str | None = None,
 ) -> tuple[Any, list[Any]]:
     """Build a fresh figure for `view` and draw the primitives on it; return (fig, axes)."""
@@ -495,7 +512,9 @@ def draw_frame(
         draw_atom_panel(
             ax, motion, t, quality=quality, atom_colors=atom_colors,
             planned_trajectory=planned_trajectory,
-            show_atom_ids=show_atom_ids, show_routing=show_routing, title=title,
+            show_atom_ids=show_atom_ids, show_routing=show_routing,
+            show_color_code=show_color_code, color_code_swap=color_code_swap,
+            title=title,
         )
         return fig, [ax]
 
@@ -519,6 +538,7 @@ def draw_frame(
                 ax, panel_motion, panel_t, quality=quality, atom_colors=atom_colors,
                 planned_trajectory=planned_trajectory,
                 show_atom_ids=show_atom_ids, show_routing=show_routing,
+                show_color_code=show_color_code, color_code_swap=color_code_swap,
                 title=f"{label}  -  t = {_format_time_us(panel_t)}",
             )
         if title:
@@ -542,7 +562,9 @@ def draw_frame(
         draw_atom_panel(
             atom_ax, motion, t, quality=quality, atom_colors=atom_colors,
             planned_trajectory=planned_trajectory,
-            show_atom_ids=show_atom_ids, show_routing=show_routing, title=None,
+            show_atom_ids=show_atom_ids, show_routing=show_routing,
+            show_color_code=show_color_code, color_code_swap=color_code_swap,
+            title=None,
         )
         draw_current_tones(row_now, ensemble, t, "row", colors=colors)
         draw_current_tones(col_now, ensemble, t, "col", colors=colors)
@@ -591,6 +613,7 @@ def render_animation(
     planned_trajectory: PlannedTrajectoryMode = "none",
     show_atom_ids: bool = False,
     show_routing_on_start: bool = True,
+    show_color_code: bool = False,
     title: str | None = None,
     show_progress: bool = True,
     fmt: RenderFormat | None = None,
@@ -656,19 +679,28 @@ def render_animation(
     frame_dur_ms = max(1, int(round(1000.0 / fps)))
     hold_ms = max(0, int(round(hold_seconds * 1000.0)))
     has_routing_frame = bool(show_routing_on_start and hold_ms > 0)
+    has_start_overlay = bool(show_color_code and hold_ms > 0)
 
-    plan: list[tuple[float, bool]] = []
+    # Plan tuple: (t, show_routing, show_color_code, color_code_swap).
+    # Start hold draws the un-swapped overlay on every panel (the
+    # initial code state). During motion `color_code_swap=True` lets
+    # each panel pick up the swapped overlay independently the moment
+    # its own ensemble finishes; the last moving frame thus already
+    # has every panel finished and overlaid, so the trailing hold is
+    # just an extended duration on that frame.
+    plan: list[tuple[float, bool, bool, bool]] = []
     durations: list[int] = []
-    if has_routing_frame:
-        plan.append((float(moving_times[0]), True))
+    if has_routing_frame or has_start_overlay:
+        plan.append((float(moving_times[0]), has_routing_frame, has_start_overlay, False))
         durations.append(hold_ms)
     elif hold_ms > 0:
-        # Intro hold without routing arrows: render slightly before t=0 so
-        # no segments are active and `draw_traps` finds nothing to draw.
-        plan.append((-1e-9, False))
+        # Intro hold without routing arrows or overlay: render slightly
+        # before t=0 so no segments are active and `draw_traps` finds
+        # nothing to draw.
+        plan.append((-1e-9, False, False, False))
         durations.append(hold_ms)
     for t in moving_times:
-        plan.append((float(t), False))
+        plan.append((float(t), False, show_color_code, True))
         durations.append(frame_dur_ms)
     if hold_ms > 0:
         durations[-1] += hold_ms
@@ -681,8 +713,8 @@ def render_animation(
         show_atom_ids=show_atom_ids, title=title,
     )
 
-    items: list[tuple[int, float, bool]] = [
-        (k, t, sr) for k, (t, sr) in enumerate(plan)
+    items: list[tuple[int, float, bool, bool, bool]] = [
+        (k, t, sr, scc, swap) for k, (t, sr, scc, swap) in enumerate(plan)
     ]
     n_workers = min(os.cpu_count() or 1, len(items))
 
@@ -1089,11 +1121,13 @@ def _frame_worker_init(
     _FRAME_WORKER["tmp_path"] = Path(tmp_path_str)
 
 
-def _frame_worker_render(item: tuple[int, float, bool]) -> str:
-    k, t, show_routing = item
+def _frame_worker_render(item: tuple[int, float, bool, bool, bool]) -> str:
+    k, t, show_routing, show_color_code, color_code_swap = item
     fig, _ = draw_frame(
         _FRAME_WORKER["motion"], float(t),
-        show_routing=show_routing, **_FRAME_WORKER["draw_kwargs"],
+        show_routing=show_routing, show_color_code=show_color_code,
+        color_code_swap=color_code_swap,
+        **_FRAME_WORKER["draw_kwargs"],
     )
     path = _FRAME_WORKER["tmp_path"] / f"frame_{k:05d}.png"
     fig.savefig(path, dpi=_FRAME_WORKER["dpi"], facecolor="white")

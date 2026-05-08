@@ -223,14 +223,15 @@ def hadamard_rotation_targets(src):
 
 
 def patch_rotation_colors(src):
-    """Color atoms by initial polar angle around the patch center."""
+    """Linear gradient along the (1,1) diagonal so a 90-degree rotation
+    flips the gradient direction visibly (diagonal -> anti-diagonal)."""
     coords = sorted({i for i, _ in src})
-    center = 0.5 * (coords[0] + coords[-1])
-    cmap = mpl.colormaps["hsv"]
+    lo, hi = coords[0] + coords[0], coords[-1] + coords[-1]
+    cmap = mpl.colormaps["viridis"]
     colors = {}
     for atom_id, (i, j) in enumerate(src):
-        theta = math.atan2(j - center, i - center)
-        colors[atom_id] = cmap((theta + math.pi) / (2.0 * math.pi))
+        s = (i + j - lo) / (hi - lo) if hi > lo else 0.5
+        colors[atom_id] = cmap(0.05 + 0.9 * s)
     return colors
 
 
@@ -636,6 +637,7 @@ def main() -> None:
         hold_seconds=1.5,
         atom_colors=patch_rotation_colors(src),
         show_routing_on_start=True,
+        show_color_code=True,
         title=f"Hadamard patch rotation ({PATCH_SIDE}x{PATCH_SIDE})",
     )
     print(f"wrote {out_path}")
