@@ -35,12 +35,100 @@ from src.atom_trajectory import AtomEnsemble
 from src.movement import PHYS_A_MAX, grid_accel_from_phys
 from src.segments import make_hold, make_smooth_segment, min_jerk_duration
 
-from src.visualization_stack_time import StackTimeStyle, save_stack_time
+from src.visualization_stack_time import (
+    StackTimeStyle,
+    save_ground_plane_2d,
+    save_stack_time,
+)
 
 N = 6
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 2.0
 OUTPUT_PATH = ROOT / "trial" / "vis_example.png"
+PER_TIMESTEP_DIR = ROOT / "trial" / "vis_example_per_timestep"
+PER_TIMESTEP_3D_DIR = ROOT / "trial" / "vis_example_per_timestep_3d"
+
+
+def save_per_timestep_frames(
+    ensemble,
+    t_values,
+    output_dir,
+    *,
+    style,
+    atom_colors,
+    filename_template="frame_{idx:02d}.png",
+):
+    """Render one 2D top-down PNG per timestep.
+
+    Calls `save_ground_plane_2d` so each frame shows the current atoms,
+    the active trap motion bars (thick row/col strips with arrowheads),
+    target site outlines, and the row/col lattice — no 3D camera, no
+    projection guides, no loss cross.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for idx, t in enumerate(t_values):
+        out = output_dir / filename_template.format(idx=idx, t=float(t))
+        save_ground_plane_2d(
+            ensemble,
+            float(t),
+            out,
+            style=style,
+            atom_colors=atom_colors,
+            show_grid=True,
+            show_traps=True,
+            show_motion_targets=True,
+            show_plane=False,
+            transparent=False,
+        )
+        paths.append(out)
+        print(f"wrote {out}")
+    return paths
+
+
+def save_per_timestep_frames_3d(
+    ensemble,
+    t_values,
+    output_dir,
+    *,
+    style,
+    atom_colors,
+    filename_template="frame_{idx:02d}.png",
+):
+    """Render one 3D-looking PNG per timestep.
+
+    Calls `save_stack_time` with a single-element `t_values=[t]` and all
+    `show_bottom_*=True`, so each frame shows the current-time layer above
+    its full projected trap trajectory on the bottom plate.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for idx, t in enumerate(t_values):
+        out = output_dir / filename_template.format(idx=idx, t=float(t))
+        save_stack_time(
+            ensemble,
+            [float(t)],
+            out,
+            style=style,
+            atom_colors=atom_colors,
+            show_traps=True,
+            show_layers=False,
+            show_layer_plane=False,
+            show_motion_arrows=False,
+            show_motion_targets=False,
+            show_trajectory=False,
+            show_bottom_plane=True,
+            show_bottom_grid=True,
+            show_bottom_traps=True,
+            show_bottom_trajectory=True,
+            show_trap_event_guides=False,
+            transparent=False,
+        )
+        paths.append(out)
+        print(f"wrote {out}")
+    return paths
 
 
 def main() -> None:
@@ -103,14 +191,14 @@ def main() -> None:
         dpi=240,
         projection_type="ortho",
         # all layers similarly opaque so the top doesn't wash out
-        layer_alpha_floor=0.85,
+        layer_alpha_floor=0.9,
         # row/col palette — used by motion arrows AND the bottom-plate
         # lattice; lattice_lines on individual layers is OFF below
         lattice_line_colors={"row": "#ff2828", "col": "#29b0ff"},
         lattice_line_extension_frac=0.7,
         # noticeably translucent layer plane — each layer reads as a plate
-        layer_plane_color="#c8d0dc",
-        layer_plane_alpha=0.50,
+        layer_plane_color="#dce2e9",
+        layer_plane_alpha=0.5,
         layer_plane_extension_frac=0.55,
         # small solid in-plane arrows: current move direction at each layer,
         # color-keyed by RIPA row/col channel
@@ -190,14 +278,38 @@ def main() -> None:
         show_motion_arrows=True,
         show_motion_targets=True,
         show_trajectory=True,
-        show_bottom_plane=True,
-        show_bottom_grid=True,
-        show_bottom_traps=True,
-        show_bottom_trajectory=True,
-        show_trap_event_guides=True,
+        show_bottom_plane=False,
+        show_bottom_grid=False,
+        show_bottom_traps=False,
+        show_bottom_trajectory=False,
+        show_trap_event_guides=False,
         transparent=False,
     )
     print(f"wrote {OUTPUT_PATH}")
+
+    per_timestep_atom_colors = {
+        0: "#1f3a93",
+        1: "#1f3a93",
+        2: "#1f3a93",
+        3: "#1f3a93",
+        4: "#1f3a93",
+    }
+
+    save_per_timestep_frames(
+        ensemble,
+        t_values,
+        PER_TIMESTEP_DIR,
+        style=style,
+        atom_colors=per_timestep_atom_colors,
+    )
+
+    # save_per_timestep_frames_3d(
+    #     ensemble,
+    #     t_values,
+    #     PER_TIMESTEP_3D_DIR,
+    #     style=style,
+    #     atom_colors=per_timestep_atom_colors,
+    # )
 
 
 if __name__ == "__main__":

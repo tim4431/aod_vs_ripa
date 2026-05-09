@@ -27,6 +27,7 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import is_color_like, to_rgb, to_rgba
+from matplotlib.patches import Circle as MplCircle, Polygon as MplPolygon
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers '3d' projection)
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
@@ -191,6 +192,14 @@ class StackTimeStyle:
     bottom_trap_arrow_head_length_frac: float = 0.13
     bottom_trap_arrow_head_width_frac: float = 0.16
     bottom_trap_arrow_z_offset: float = 0.02
+
+    # 2D ground-plane gate blobs (single-qubit rotations rendered as a
+    # Gaussian glow at the atom's site). Single-color channels render
+    # solid; two-color channels split angularly using `trap_two_tone_theta`.
+    gate_blob_radius_frac: float = 0.55
+    gate_blob_sigma_frac: float = 0.42
+    gate_blob_alpha_max: float = 0.85
+    gate_blob_grid_size: int = 96
 
     # Vertical guide lines at trap start/end/handoff positions
     trap_event_guide_color: Any = "#7d8795"
@@ -560,16 +569,29 @@ def draw_stack_time(
     show_bottom_traps: bool = False,
     show_bottom_trajectory: bool = True,
     show_trap_event_guides: bool = False,
+    show_layers: bool = True,
     style: StackTimeStyle | None = None,
     title: str | None = None,
 ) -> None:
     """Draw a time-stacked 3D figure of `motion` on a 3D `ax`.
 
     `style` selects visual parameters. The remaining `show_*` flags cover
-    major layers of the current illustration; atom layers always render.
+    major layers of the current illustration. Set `show_layers=False` to
+    suppress the upper time-slice layers (atoms, layer plane, motion
+    arrows / targets, trajectory polylines) so only the bottom plate
+    renders — useful for ground-plane-only frames in a 3D camera.
     """
     s = style if style is not None else DEFAULT_STYLE
     ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
+
+    # Matplotlib's automatic 3D z-sort uses min(projected_zs) for
+    # Line3DCollection, which can put trajectory lines in front of the
+    # layer atoms when their projected camera-z falls below the atom's
+    # set_sort_zpos. Disable computed_zorder so the painter's algorithm
+    # uses the draw order we control: lower layers and their slab content
+    # are emitted before higher layers, so atoms and planes always end up
+    # in front of the slab below them.
+    ax.computed_zorder = False
 
     t_arr = sorted(float(t) for t in t_values)
     n_layers = len(t_arr)
@@ -631,6 +653,29 @@ def draw_stack_time(
     z_bot = float(layer_zs[-1])
     z_max = max(z_top, 1.0)
     t_min, t_max = t_arr[0], t_arr[-1]
+
+    def _is_freshly_loaded(atom: Any, t: float, eps: float = 1e-9) -> bool:
+        """Fresh-loaded recolor rule, anchored to the first stack time.
+
+        An atom whose first non-zero segment starts strictly after the
+        first stack time `t_min` counts as a reservoir delivery: it stays
+        in the fresh color until that first segment ends, so the layer
+        showing the moment of first addressing still renders gray.
+        Atoms whose first segment starts at `t_min` are part of the
+        initial configuration and are never fresh. Defers to the
+        module-level `_is_fresh_at` so monkey-patches still take effect.
+        """
+        if _is_fresh_at(atom, t, eps):
+            return True
+        first_seg = next(
+            (seg for seg in atom.segments if seg.duration > 0), None,
+        )
+        if first_seg is None:
+            return False
+        return (
+            first_seg.start_time > t_min + eps
+            and t < first_seg.end_time - eps
+        )
 
     def t_to_z(ts: np.ndarray) -> np.ndarray:
         if t_max <= t_min:
@@ -764,26 +809,38 @@ def draw_stack_time(
                 solid_capstyle="round",
             )
 
-    if show_bottom_traps and show_traps and t_max > t_min:
+    if show_bottom_traps and show_traps:
+        single_time = t_max <= t_min
         for atom in ensemble.atomtrajs:
             for seg in atom.segments:
                 if seg.duration <= 0:
                     continue
                 if seg.end_time < t_min - 1e-15 or seg.start_time > t_max + 1e-15:
                     continue
-                seg_lo = max(seg.start_time, t_min)
-                seg_hi = min(seg.end_time, t_max)
-                if atom.lost_at is not None:
-                    if atom.lost_at <= seg_lo + 1e-15:
+                if single_time:
+                    # Single-time snapshot: draw the full start->end bar of
+                    # any segment that is active at t (mirrors the 2D
+                    # ground-plane trap rendering).
+                    if atom.lost_at is not None and atom.lost_at <= t_min + 1e-15:
                         continue
-                    if atom.lost_at < seg_hi - 1e-15:
-                        seg_hi = atom.lost_at
-                if seg_hi <= seg_lo:
-                    continue
-                xy = grid.ij_to_xy(np.asarray([
-                    seg.position_at(float(seg_lo)),
-                    seg.position_at(float(seg_hi)),
-                ], dtype=float))
+                    xy = grid.ij_to_xy(np.asarray([
+                        seg.start_pos,
+                        seg.end_pos,
+                    ], dtype=float))
+                else:
+                    seg_lo = max(seg.start_time, t_min)
+                    seg_hi = min(seg.end_time, t_max)
+                    if atom.lost_at is not None:
+                        if atom.lost_at <= seg_lo + 1e-15:
+                            continue
+                        if atom.lost_at < seg_hi - 1e-15:
+                            seg_hi = atom.lost_at
+                    if seg_hi <= seg_lo:
+                        continue
+                    xy = grid.ij_to_xy(np.asarray([
+                        seg.position_at(float(seg_lo)),
+                        seg.position_at(float(seg_hi)),
+                    ], dtype=float))
                 if np.hypot(*(xy[1] - xy[0])) <= 1e-12:
                     continue
                 r, g, b, _ = _blend_colorway(s.trap_channel_colors.get(
@@ -873,7 +930,7 @@ def draw_stack_time(
 
             normal_rgba = to_rgba(colors[idx])
             start_color = (
-                fresh_rgba if _is_fresh_at(atom, t_min) else normal_rgba
+                fresh_rgba if _is_freshly_loaded(atom, t_min) else normal_rgba
             )
             bottom_marker_draws.append((
                 xy[0:1],
@@ -889,7 +946,7 @@ def draw_stack_time(
                 # position with no extra marker — the in-stack cross is
                 # the single source of truth.
                 end_color = (
-                    fresh_rgba if _is_fresh_at(atom, traj_end) else normal_rgba
+                    fresh_rgba if _is_freshly_loaded(atom, traj_end) else normal_rgba
                 )
                 bottom_marker_draws.append((
                     xy[-1:],
@@ -914,18 +971,13 @@ def draw_stack_time(
             10.0 * s.layer_spacing,
         )
 
-    for loss_xy in bottom_loss_points:
-        _draw_planar_cross(
-            ax,
-            loss_xy,
-            bottom_marker_z,
-            loss_target_cross_size,
-            s.loss_target_cross_color,
-            s.loss_target_cross_lw,
-            s.loss_target_cross_alpha,
-            0.0,
-            10.0 * s.layer_spacing + 0.2,
-        )
+    if show_bottom_plane:
+        for loss_xy in bottom_loss_points:
+            ax.scatter(
+                [float(loss_xy[0])], [float(loss_xy[1])], [bottom_marker_z],
+                s=s.loss_marker_size, c=s.loss_marker_color, marker="x",
+                linewidths=s.loss_marker_lw, depthshade=False,
+            )
 
     if show_trap_event_guides and show_traps:
         event_points: list[tuple[float, float, float]] = []
@@ -1075,7 +1127,7 @@ def draw_stack_time(
         for k, atom in enumerate(ensemble.atomtrajs):
             if atom.is_lost_at(t):
                 continue
-            if _is_fresh_at(atom, t):
+            if _is_freshly_loaded(atom, t):
                 base = fresh_rgba_full
             else:
                 base = to_rgba(colors[k])
@@ -1145,19 +1197,6 @@ def draw_stack_time(
             return
         seg_lo = max(seg.start_time, t_lo)
         seg_hi = min(seg.end_time, t_hi)
-        truncated_by_loss = False
-        if (
-            atom.lost_at is not None
-            and atom.lost_at < seg_hi - 1e-15
-            and atom.lost_at >= seg_lo - 1e-15
-        ):
-            seg_hi = atom.lost_at
-            truncated_by_loss = True
-        if (
-            atom.lost_at is not None
-            and atom.lost_at <= seg_lo + 1e-15
-        ):
-            return
         if seg_hi <= seg_lo:
             return
         ts = np.linspace(seg_lo, seg_hi, s.trap_samples_per_segment)
@@ -1172,10 +1211,7 @@ def draw_stack_time(
             env_in = _smoothstep((ts - seg.start_time) / ramp_in)
         else:
             env_in = np.ones_like(ts)
-        if truncated_by_loss:
-            ramp_out_frac = s.loss_fade_frac
-        else:
-            ramp_out_frac = s.trap_ramp_frac
+        ramp_out_frac = s.trap_ramp_frac
         if ramp_out_frac > 0.0:
             ramp_out = max(seg.duration * ramp_out_frac, 1e-15)
             env_out = _smoothstep((effective_end - ts) / ramp_out)
@@ -1193,7 +1229,7 @@ def draw_stack_time(
         _draw_trap_tube(
             ax, xy, zs, wall_alpha, trap_radius,
             [to_rgb(c) for c in _colorway(channel_color)], s.tube_facets,
-            sort_zpos=float(np.mean(zs)) + 0.04 * s.layer_spacing,
+            sort_zpos=float(np.mean(zs)),
             theta0=s.trap_two_tone_theta,
         )
 
@@ -1243,12 +1279,12 @@ def draw_stack_time(
                 alpha=s.trajectory_alpha,
             )
             ax.add_collection3d(lc)
-            try:
-                lc.set_sort_zpos(float(np.max(zs)) + 0.02 * s.layer_spacing)
-            except AttributeError:
-                pass
 
     def _draw_loss_markers_in_range(t_lo: float, t_hi: float) -> None:
+        # When the bottom plate is shown, the loss cross is projected onto
+        # it once; suppress the in-stack copy so we don't render two crosses.
+        if show_bottom_plane:
+            return
         for atom in ensemble.atomtrajs:
             if atom.lost_at is None:
                 continue
@@ -1257,31 +1293,39 @@ def draw_stack_time(
 
     # Walk from the bottom-most layer up to the top.
     # i = n_layers - 1 is at lowest z; i = 0 is at highest z.
-    for i in range(n_layers - 1, -1, -1):
-        # Draw the later-time layer first; then draw the slab above it.
-        # On the next iteration the earlier-time layer is drawn, masking
-        # the trajectory/traps in between.
-        _draw_layer(i)
-        if i > 0:
-            t_above_lo = t_arr[i - 1]
-            t_above_hi = t_arr[i]
-            # Stack order inside each time slab:
-            # later layer < trajectory < traps/loss < earlier layer.
-            _draw_trajectory_in_range(t_above_lo, t_above_hi)
-            for atom in ensemble.atomtrajs:
-                for seg in atom.segments:
-                    if seg.end_time <= t_above_lo - 1e-15:
-                        continue
-                    if seg.start_time >= t_above_hi + 1e-15:
-                        continue
-                    _draw_trap_for_seg(atom, seg, t_above_lo, t_above_hi)
-            _draw_loss_markers_in_range(t_above_lo, t_above_hi)
+    if show_layers:
+        for i in range(n_layers - 1, -1, -1):
+            # Draw the later-time layer first; then draw the slab above it.
+            # On the next iteration the earlier-time layer is drawn, masking
+            # the trajectory/traps in between.
+            _draw_layer(i)
+            if i > 0:
+                t_above_lo = t_arr[i - 1]
+                t_above_hi = t_arr[i]
+                # Stack order inside each time slab:
+                # later layer < trajectory < traps/loss < earlier layer.
+                _draw_trajectory_in_range(t_above_lo, t_above_hi)
+                for atom in ensemble.atomtrajs:
+                    for seg in atom.segments:
+                        if seg.end_time <= t_above_lo - 1e-15:
+                            continue
+                        if seg.start_time >= t_above_hi + 1e-15:
+                            continue
+                        _draw_trap_for_seg(atom, seg, t_above_lo, t_above_hi)
+                _draw_loss_markers_in_range(t_above_lo, t_above_hi)
 
     # --- view + axes ----------------------------------------------------
-    asp_z = max(1.1, n_layers / 6.0)
+    if show_layers:
+        asp_z = max(1.1, n_layers / 6.0)
+        z_view_max = z_max
+    else:
+        # Bottom-plate-only view: shrink the z box so the plate fills the
+        # figure instead of floating at the bottom of a tall stack box.
+        z_view_max = max(bottom_marker_z * 4.0, 1e-3)
+        asp_z = 0.18
     ax.set_xlim(xy_lo, xy_hi)
     ax.set_ylim(xy_lo, xy_hi)
-    ax.set_zlim(0, z_max)
+    ax.set_zlim(0, z_view_max)
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.fill = False
         axis.pane.set_edgecolor("none")
@@ -1384,5 +1428,542 @@ def save_stack_time(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=s.dpi, transparent=transparent, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 2D top-down ground-plane rendering. Mirrors the bottom-plate look from
+# `draw_stack_time` (row/col grid, thick trap bars with arrowheads, target
+# outlines, atom discs) but on a regular 2D Matplotlib Axes — no 3D camera,
+# no projection guides, no loss cross.
+# ---------------------------------------------------------------------------
+
+
+def _strip_polygon_2d(
+    xy0: Sequence[float],
+    xy1: Sequence[float],
+    width: float,
+) -> list[tuple[float, float]] | None:
+    p0 = np.asarray(xy0, dtype=float)
+    p1 = np.asarray(xy1, dtype=float)
+    delta = p1 - p0
+    length = float(np.hypot(delta[0], delta[1]))
+    if length <= 1e-12:
+        return None
+    perp = np.array([-delta[1], delta[0]], dtype=float) / length
+    half = 0.5 * float(width)
+    offset = half * perp
+    return [
+        (float(p0[0] + offset[0]), float(p0[1] + offset[1])),
+        (float(p1[0] + offset[0]), float(p1[1] + offset[1])),
+        (float(p1[0] - offset[0]), float(p1[1] - offset[1])),
+        (float(p0[0] - offset[0]), float(p0[1] - offset[1])),
+    ]
+
+
+def _draw_planar_segment_strip_2d(
+    ax: Any,
+    xy0: Sequence[float],
+    xy1: Sequence[float],
+    width: float,
+    rgba: Any,
+    *,
+    zorder: float = 1.0,
+) -> None:
+    poly = _strip_polygon_2d(xy0, xy1, width)
+    if poly is None:
+        return
+    ax.add_patch(MplPolygon(
+        poly, closed=True, facecolor=rgba, edgecolor="none", linewidth=0,
+        zorder=zorder,
+    ))
+
+
+def _draw_solid_planar_arrow_2d(
+    ax: Any,
+    x0: float, y0: float,
+    ux: float, uy: float,
+    length: float,
+    color: Any,
+    lw: float,
+    alpha: float,
+    head_length: float,
+    head_width: float,
+    start_offset: float,
+    *,
+    zorder: float = 1.0,
+) -> None:
+    if length <= 0.0:
+        return
+    r, g, b, a = to_rgba(color)
+    rgba = (r, g, b, a * alpha)
+    start_x = float(x0) + ux * start_offset
+    start_y = float(y0) + uy * start_offset
+    tip_x = start_x + ux * length
+    tip_y = start_y + uy * length
+    head_length = min(max(0.0, head_length), 0.72 * length)
+    head_width = max(0.0, head_width)
+    base_x = tip_x - ux * head_length
+    base_y = tip_y - uy * head_length
+    shaft_len = length - head_length
+    if shaft_len > 0.0:
+        ax.plot(
+            [start_x, base_x], [start_y, base_y],
+            color=rgba, lw=lw, solid_capstyle="round",
+            zorder=zorder,
+        )
+    perp_x = -uy
+    perp_y = ux
+    tri = [
+        (tip_x, tip_y),
+        (base_x + 0.5 * head_width * perp_x,
+         base_y + 0.5 * head_width * perp_y),
+        (base_x - 0.5 * head_width * perp_x,
+         base_y - 0.5 * head_width * perp_y),
+    ]
+    ax.add_patch(MplPolygon(
+        tri, closed=True, facecolor=rgba, edgecolor="none", linewidth=0,
+        zorder=zorder,
+    ))
+
+
+def _draw_planar_circle_outline_2d(
+    ax: Any,
+    center_xy: Sequence[float],
+    radius: float,
+    color: Any,
+    lw: float,
+    alpha: float,
+    dashes: Sequence[float],
+    *,
+    zorder: float = 1.0,
+) -> None:
+    if radius <= 0.0:
+        return
+    r, g, b, a = to_rgba(color)
+    circle = MplCircle(
+        (float(center_xy[0]), float(center_xy[1])),
+        float(radius),
+        facecolor="none",
+        edgecolor=(r, g, b, a * alpha),
+        lw=lw,
+        zorder=zorder,
+    )
+    ax.add_patch(circle)
+    circle.set_linestyle((0, tuple(float(x) for x in dashes)))
+
+
+def _draw_planar_disc_2d(
+    ax: Any,
+    center_xy: Sequence[float],
+    radius: float,
+    facecolor: Any,
+    edgecolor: Any,
+    edge_lw: float,
+    *,
+    zorder: float = 1.0,
+) -> None:
+    ax.add_patch(MplCircle(
+        (float(center_xy[0]), float(center_xy[1])),
+        float(radius),
+        facecolor=facecolor,
+        edgecolor=edgecolor,
+        lw=edge_lw,
+        zorder=zorder,
+    ))
+
+
+def _draw_planar_cross_2d(
+    ax: Any,
+    center_xy: Sequence[float],
+    size: float,
+    color: Any,
+    lw: float,
+    alpha: float,
+    *,
+    zorder: float = 1.0,
+) -> None:
+    if size <= 0.0:
+        return
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    r, g, b, a = to_rgba(color)
+    rgba = (r, g, b, a * alpha)
+    half = 0.5 * float(size)
+    for sx, sy in ((1.0, 1.0), (1.0, -1.0)):
+        ax.plot(
+            [cx - sx * half, cx + sx * half],
+            [cy - sy * half, cy + sy * half],
+            color=rgba, lw=lw, solid_capstyle="round",
+            zorder=zorder,
+        )
+
+
+def _draw_gaussian_blob_2d(
+    ax: Any,
+    center_xy: Sequence[float],
+    radius: float,
+    color: Any,
+    *,
+    sigma_frac: float = 0.42,
+    alpha_max: float = 0.85,
+    grid_size: int = 96,
+    zorder: float = 1.0,
+) -> None:
+    """Soft single-color Gaussian glow centered on `center_xy`."""
+    if radius <= 0.0:
+        return
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    r_box = float(radius)
+    sigma = max(float(sigma_frac) * r_box, 1e-9)
+    n = max(8, int(grid_size))
+    xs = np.linspace(-r_box, r_box, n)
+    ys = np.linspace(-r_box, r_box, n)
+    XX, YY = np.meshgrid(xs, ys)
+    dist2 = XX * XX + YY * YY
+    alpha = np.exp(-dist2 / (2.0 * sigma * sigma)) * float(alpha_max)
+    alpha[dist2 > r_box * r_box] = 0.0
+    rgb = np.array(to_rgba(color))[:3]
+    img = np.empty((n, n, 4), dtype=float)
+    img[..., 0] = rgb[0]
+    img[..., 1] = rgb[1]
+    img[..., 2] = rgb[2]
+    img[..., 3] = alpha
+    ax.imshow(
+        img,
+        extent=(cx - r_box, cx + r_box, cy - r_box, cy + r_box),
+        origin="lower",
+        interpolation="bilinear",
+        aspect="auto",
+        zorder=zorder,
+    )
+
+
+def _draw_gaussian_blob_two_tone_2d(
+    ax: Any,
+    center_xy: Sequence[float],
+    radius: float,
+    color_a: Any,
+    color_b: Any,
+    *,
+    theta0: float = 0.0,
+    sigma_frac: float = 0.42,
+    alpha_max: float = 0.85,
+    grid_size: int = 96,
+    zorder: float = 1.0,
+) -> None:
+    """Two-tone Gaussian glow: angular split with smooth transition band.
+
+    Uses the same `_angular_two_tone_rgbs` color mixing as the 3D trap
+    tubes, so two-color gate channels (e.g. Rx = orange/yellow) read
+    identically across views.
+    """
+    if radius <= 0.0:
+        return
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    r_box = float(radius)
+    sigma = max(float(sigma_frac) * r_box, 1e-9)
+    n = max(8, int(grid_size))
+    xs = np.linspace(-r_box, r_box, n)
+    ys = np.linspace(-r_box, r_box, n)
+    XX, YY = np.meshgrid(xs, ys)
+    dist2 = XX * XX + YY * YY
+    alpha = np.exp(-dist2 / (2.0 * sigma * sigma)) * float(alpha_max)
+    alpha[dist2 > r_box * r_box] = 0.0
+    theta = np.arctan2(YY, XX)
+    rgbs = np.asarray([to_rgba(color_a)[:3], to_rgba(color_b)[:3]], dtype=float)
+    rgb = _angular_two_tone_rgbs(rgbs, theta, theta0=theta0)
+    img = np.empty((n, n, 4), dtype=float)
+    img[..., :3] = rgb
+    img[..., 3] = alpha
+    ax.imshow(
+        img,
+        extent=(cx - r_box, cx + r_box, cy - r_box, cy + r_box),
+        origin="lower",
+        interpolation="bilinear",
+        aspect="auto",
+        zorder=zorder,
+    )
+
+
+def draw_ground_plane_2d(
+    ax: Any,
+    motion: Any,
+    t: float,
+    *,
+    atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
+    show_grid: bool = True,
+    show_traps: bool = True,
+    show_motion_targets: bool = True,
+    show_plane: bool = False,
+    show_loss_cross: bool = True,
+    style: StackTimeStyle | None = None,
+    title: str | None = None,
+) -> None:
+    """Draw a single timestep as a 2D top-down ground-plane figure.
+
+    Reuses the StackTimeStyle knobs that drive the 3D bottom plate
+    (bottom_grid_*, bottom_trap_*, motion_target_circle_*, atom_*) so the
+    look matches the existing bottom-plate styling.
+    """
+    s = style if style is not None else DEFAULT_STYLE
+    ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
+    t = float(t)
+
+    colors = _atom_colors_rgba(
+        [int(a.atom_id) for a in ensemble.atomtrajs], atom_colors,
+    )
+
+    grid = ensemble.grid
+    d = grid.d
+    atom_radius = np.sqrt(0.7) * s.atom_radius_frac * d
+    site_lo = (0.0 - grid.center) * d
+    site_hi = ((grid.N - 1.0) - grid.center) * d
+    line_lo = site_lo - s.lattice_line_extension_frac * d
+    line_hi = site_hi + s.lattice_line_extension_frac * d
+    plane_lo = site_lo - s.layer_plane_extension_frac * d
+    plane_hi = site_hi + s.layer_plane_extension_frac * d
+    bound_lo = min(plane_lo, line_lo)
+    bound_hi = max(plane_hi, line_hi)
+    bottom_trap_width = max(
+        0.006 * d,
+        float(s.bottom_trap_width_frac) * d,
+        0.018 * float(s.bottom_trap_lw) * d,
+    )
+
+    # Auto-expand bounds for off-lattice endpoints (fresh-load reservoirs).
+    margin = 0.5 * d
+    for atom in ensemble.atomtrajs:
+        ij_pts = [np.asarray(atom.initial_pos, dtype=float)]
+        for seg in atom.segments:
+            ij_pts.append(np.asarray(seg.start_pos, dtype=float))
+            ij_pts.append(np.asarray(seg.end_pos, dtype=float))
+        for ij in ij_pts:
+            x, y = grid.ij_to_xy(ij)
+            bound_lo = min(bound_lo, float(x) - margin, float(y) - margin)
+            bound_hi = max(bound_hi, float(x) + margin, float(y) + margin)
+
+    plane_color = (
+        s.layer_plane_color
+        if s.bottom_plane_color is None
+        else s.bottom_plane_color
+    )
+
+    # Layer order (lowest -> highest matplotlib zorder):
+    #   plane bg  ->  grid lines  ->  trap projection  ->  target outline
+    #             ->  atom disc
+    Z_PLANE = 0.0
+    Z_GRID = 1.0
+    Z_TRAP = 2.0
+    Z_TARGET = 3.0
+    Z_ATOM = 4.0
+
+    if show_plane:
+        ax.add_patch(MplPolygon(
+            [
+                (bound_lo, bound_lo),
+                (bound_hi, bound_lo),
+                (bound_hi, bound_hi),
+                (bound_lo, bound_hi),
+            ],
+            closed=True,
+            facecolor=plane_color,
+            alpha=s.bottom_plane_alpha,
+            edgecolor="none",
+            linewidth=0,
+            zorder=Z_PLANE,
+        ))
+
+    if show_grid:
+        bot_row_color = to_rgba(s.lattice_line_colors.get("row", "#ff2828"))
+        bot_col_color = to_rgba(s.lattice_line_colors.get("col", "#29b0ff"))
+        for jj in range(grid.N):
+            y_row = (jj - grid.center) * d
+            ax.plot(
+                [line_lo, line_hi], [y_row, y_row],
+                color=bot_row_color, lw=s.bottom_grid_lw,
+                alpha=s.bottom_grid_alpha, solid_capstyle="round",
+                zorder=Z_GRID,
+            )
+        for ii in range(grid.N):
+            x_col = (ii - grid.center) * d
+            ax.plot(
+                [x_col, x_col], [line_lo, line_hi],
+                color=bot_col_color, lw=s.bottom_grid_lw,
+                alpha=s.bottom_grid_alpha, solid_capstyle="round",
+                zorder=Z_GRID,
+            )
+
+    # Currently-active trap segments. Non-zero displacement renders as a
+    # thick colored bar with arrowhead (mirrors `show_bottom_traps` in
+    # `draw_stack_time`); zero-displacement segments are stationary
+    # single-qubit gates and render as a Gaussian glow at the atom's site.
+    if show_traps:
+        gate_blob_radius = float(s.gate_blob_radius_frac) * d
+        for atom in ensemble.atomtrajs:
+            if atom.is_lost_at(t):
+                continue
+            seg = _intended_segment(atom, t)
+            if seg is None:
+                continue
+            xy0 = grid.ij_to_xy(np.asarray(seg.start_pos, dtype=float))
+            xy1 = grid.ij_to_xy(np.asarray(seg.end_pos, dtype=float))
+            color_spec = s.trap_channel_colors.get(
+                seg.channel, s.trap_channel_colors.get(None, "#9a9a9a"),
+            )
+            if np.hypot(*(xy1 - xy0)) <= 1e-12:
+                center_xy = grid.ij_to_xy(np.asarray(
+                    atom.position_at(t), dtype=float,
+                ))
+                colors_list = _colorway(color_spec)
+                if len(colors_list) >= 2:
+                    _draw_gaussian_blob_two_tone_2d(
+                        ax, center_xy, gate_blob_radius,
+                        colors_list[0], colors_list[1],
+                        theta0=s.trap_two_tone_theta,
+                        sigma_frac=s.gate_blob_sigma_frac,
+                        alpha_max=s.gate_blob_alpha_max,
+                        grid_size=s.gate_blob_grid_size,
+                        zorder=Z_TRAP,
+                    )
+                else:
+                    _draw_gaussian_blob_2d(
+                        ax, center_xy, gate_blob_radius,
+                        colors_list[0],
+                        sigma_frac=s.gate_blob_sigma_frac,
+                        alpha_max=s.gate_blob_alpha_max,
+                        grid_size=s.gate_blob_grid_size,
+                        zorder=Z_TRAP,
+                    )
+                continue
+            r, g, b, _ = _blend_colorway(color_spec)
+            _draw_planar_segment_strip_2d(
+                ax, xy0, xy1, bottom_trap_width,
+                (r, g, b, s.bottom_trap_alpha),
+                zorder=Z_TRAP,
+            )
+            arrow_len = max(0.0, float(s.bottom_trap_arrow_length_frac)) * d
+            if arrow_len > 0.0:
+                direction = xy1 - xy0
+                norm = float(np.hypot(direction[0], direction[1]))
+                if norm > 1e-12:
+                    ux = float(direction[0]) / norm
+                    uy = float(direction[1]) / norm
+                    center = 0.5 * (xy0 + xy1)
+                    arrow_start = center - 0.5 * arrow_len * np.array([ux, uy])
+                    arrow_color = _darken((r, g, b, 1.0), 0.62)
+                    _draw_solid_planar_arrow_2d(
+                        ax,
+                        float(arrow_start[0]), float(arrow_start[1]),
+                        ux, uy, arrow_len, arrow_color,
+                        s.bottom_trap_arrow_lw,
+                        s.bottom_trap_arrow_alpha,
+                        min(
+                            max(0.0, s.bottom_trap_arrow_head_length_frac) * d,
+                            0.45 * arrow_len,
+                        ),
+                        max(0.0, s.bottom_trap_arrow_head_width_frac) * d,
+                        0.0,
+                        zorder=Z_TRAP,
+                    )
+
+    if show_motion_targets:
+        for atom in ensemble.atomtrajs:
+            if atom.is_lost_at(t):
+                continue
+            seg = _intended_segment(atom, t)
+            if seg is None:
+                continue
+            target_xy = grid.ij_to_xy(np.asarray(seg.end_pos, dtype=float))
+            current_xy = grid.ij_to_xy(np.asarray(
+                atom.position_at(t), dtype=float,
+            ))
+            if np.hypot(
+                float(target_xy[0]) - float(current_xy[0]),
+                float(target_xy[1]) - float(current_xy[1]),
+            ) <= 1e-12:
+                continue
+            _draw_planar_circle_outline_2d(
+                ax, target_xy, atom_radius,
+                s.motion_target_circle_color,
+                s.motion_target_circle_lw,
+                s.motion_target_circle_alpha,
+                s.motion_target_circle_dashes,
+                zorder=Z_TARGET,
+            )
+
+    if show_loss_cross:
+        # Mark the *future* loss site as a projection: only render the X
+        # while the loss is still upcoming (t < lost_at). Once the atom is
+        # lost, the X disappears.
+        loss_cross_size = 0.5 * d
+        for atom in ensemble.atomtrajs:
+            if atom.lost_at is None:
+                continue
+            if float(atom.lost_at) <= t + 1e-12:
+                continue
+            loss_xy = grid.ij_to_xy(np.asarray(
+                atom.position_at(float(atom.lost_at)), dtype=float,
+            ))
+            _draw_planar_cross_2d(
+                ax, loss_xy, loss_cross_size,
+                s.loss_marker_color, s.loss_marker_lw, 1.0,
+                zorder=Z_TARGET,
+            )
+
+    fresh_rgba_full = to_rgba(s.fresh_atom_color)
+    edge_rgba = to_rgba(s.atom_edge_color)
+    ij_now = ensemble.positions_at(t)
+    atom_xy = grid.ij_to_xy(ij_now)
+    for k, atom in enumerate(ensemble.atomtrajs):
+        if atom.is_lost_at(t):
+            continue
+        if _is_fresh_at(atom, t):
+            face = fresh_rgba_full
+        else:
+            face = to_rgba(colors[k])
+        _draw_planar_disc_2d(
+            ax, atom_xy[k], atom_radius, face, edge_rgba, s.atom_edge_lw,
+            zorder=Z_ATOM,
+        )
+
+    ax.set_facecolor("white")
+
+    ax.set_xlim(bound_lo, bound_hi)
+    ax.set_ylim(bound_lo, bound_hi)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    if title:
+        ax.set_title(title, pad=s.title_pad, fontsize=s.title_fontsize)
+
+
+def save_ground_plane_2d(
+    motion: Any,
+    t: float,
+    output_path: str | Path,
+    *,
+    style: StackTimeStyle | None = None,
+    title: str | None = None,
+    transparent: bool = True,
+    **draw_kwargs: Any,
+) -> Path:
+    """Render a single 2D top-down ground-plane snapshot to a PNG file."""
+    s = style if style is not None else DEFAULT_STYLE
+    fig, ax = plt.subplots(figsize=s.figsize, dpi=s.dpi)
+    draw_ground_plane_2d(ax, motion, t, style=s, title=title, **draw_kwargs)
+    if not transparent:
+        fig.patch.set_facecolor("white")
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        out,
+        dpi=s.dpi,
+        transparent=transparent,
+        bbox_inches="tight",
+        facecolor=fig.get_facecolor(),
+    )
     plt.close(fig)
     return out
