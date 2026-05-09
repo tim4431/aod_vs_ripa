@@ -53,7 +53,7 @@ def main() -> None:
         [
             (1, 1),
             (0, 3),
-            (2, 4),
+            (3, 4),
             (3, 2),
             (5, 3),
             (5,4),
@@ -75,7 +75,7 @@ def main() -> None:
             (0, 3), (1, 3), 0.0, duration=t0, channel="row",
         )),
         (2, make_smooth_segment(
-            (2, 4), (2, 3), 0.0, duration=t0, channel="col",
+            (3, 4), (3, 3), 0.0, duration=t0, channel="col",
         )),
         (3, make_smooth_segment(
             (3, 2), (2, 2), 0.0, duration=t0, channel="row",
@@ -90,13 +90,13 @@ def main() -> None:
         (0, make_hold((1, 2), t0, t0, channel="rz")),
         (3, make_hold((2, 2), t0, t0, channel="rx")),
         (4, make_smooth_segment(
-            (5, 3), (2, 3), t0, duration=t0, channel="row",
+            (5, 3), (3, 3), t0, duration=t0, channel="row",
         )),
     ])
 
 
 
-    t_values = [k * t0 for k in range(4)]
+    t_values = [k * t0 for k in range(3)]
 
     style = StackTimeStyle(
         figsize=(7.6, 8.6),
@@ -130,7 +130,6 @@ def main() -> None:
         motion_target_circle_color="#7d8795",
         motion_target_circle_alpha=0.78,
         motion_target_circle_lw=1.2,
-        motion_target_circle_radius_frac=0.33,
         motion_target_circle_dashes=(3.0, 2.4),
         # atoms: dark blue baseline, fresh (un-addressed) color = gray
         atom_radius_frac=0.28,
@@ -149,6 +148,7 @@ def main() -> None:
             "rx": ("#f97316", "#facc15"),
             "aod": "#888888", None: "#888888",
         },
+        trap_two_tone_theta=3*np.pi/4-0.33,
         trap_ramp_frac=0.30,
         trap_ramp_alpha_floor=0.12,
         trap_samples_per_segment=56,

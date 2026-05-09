@@ -111,7 +111,6 @@ class StackTimeStyle:
     motion_target_circle_color: Any = "#7d8795"
     motion_target_circle_alpha: float = 0.75
     motion_target_circle_lw: float = 1.0
-    motion_target_circle_radius_frac: float = 0.31
     motion_target_circle_segments: int = 80
     motion_target_circle_dashes: tuple[float, float] = (3.0, 2.5)
     motion_target_circle_z_offset: float = 0.04
@@ -129,9 +128,15 @@ class StackTimeStyle:
     loss_marker_size: float = 90.0
     loss_marker_lw: float = 2.0
     loss_fade_frac: float = 0.20
+    loss_target_cross_color: Any = "#4b5563"
+    loss_target_cross_lw: float = 2.2
+    loss_target_cross_alpha: float = 0.90
+    loss_target_cross_size_frac: float = 0.4
+    loss_target_cross_z_offset: float = 0.06
 
     # Trap tubes. `trap_channel_colors` values may be one color or a
-    # sequence of colors; sequences render as a smooth left/right blend.
+    # two-color pair; pairs render as angular half-cylinders with a white
+    # transition band at `trap_two_tone_theta + pi`.
     trap_radius_frac: float = 0.30
     trap_max_alpha: float = 0.62
     trap_channel_colors: Mapping[Any, Any] = field(
@@ -142,6 +147,9 @@ class StackTimeStyle:
             None: "#9a9a9a",
         }
     )
+    # Start angle for two-tone trap tubes. Color 0 covers
+    # [theta, theta + pi], color 1 covers [theta + pi, theta + 2pi].
+    trap_two_tone_theta: float = 0
     # Smoothstep fade ramp at each end of a normal trap tube, expressed
     # as a fraction of the segment duration. The segment is sampled in
     # time but rendered along z, so this is effectively a *depth* fade
@@ -151,13 +159,14 @@ class StackTimeStyle:
     trap_ramp_frac: float = 0.10
     trap_ramp_alpha_floor: float = 0.0
     trap_samples_per_segment: int = 36
-    tube_facets: int = 32
+    tube_facets: int = 128
 
     # Trajectory polylines through the stack
     trajectory_lw: float = 1.4
     trajectory_alpha: float = 0.7
     trajectory_darken: float = 0.65
     trajectory_samples_per_segment: int = 24
+    trajectory_z_offset: float = 0.06
 
     # Bottom plate grid lines
     bottom_plane_color: Any | None = None
@@ -211,8 +220,8 @@ def _colorway(color_spec: Any) -> list[Any]:
     """Return one or more colors from a channel color specification.
 
     Most channels use a single Matplotlib color. A channel may also provide
-    a sequence of colors, which the trap tube renders as a smooth left/right
-    blend; this is useful for multi-tone optical gates.
+    a two-color sequence, which the trap tube renders as angular half-cylinders
+    with a white transition band; this is useful for multi-tone optical gates.
     """
     if is_color_like(color_spec):
         return [color_spec]
@@ -230,20 +239,43 @@ def _blend_colorway(color_spec: Any) -> tuple[float, float, float, float]:
     return (float(rgb[0]), float(rgb[1]), float(rgb[2]), float(alpha))
 
 
-def _smooth_colorway_rgbs(
+def _angular_two_tone_rgbs(
     rgbs: np.ndarray,
-    u: np.ndarray,
+    theta: np.ndarray,
+    theta0: float = 0.0,
 ) -> np.ndarray:
-    """Smoothly interpolate one or more RGB stops across `u in [0, 1]`."""
-    stops = np.asarray(rgbs, dtype=float).reshape(-1, 3)
-    u = np.clip(np.asarray(u, dtype=float), 0.0, 1.0)
-    if len(stops) == 1:
-        return np.broadcast_to(stops[0], u.shape + (3,))
+    """Color [theta0, theta0+pi] with color 0 and the opposite half with color 1.
 
-    scaled = u * (len(stops) - 1)
-    idx = np.minimum(np.floor(scaled).astype(int), len(stops) - 2)
-    local = _smoothstep(scaled - idx)
-    return (1.0 - local)[..., None] * stops[idx] + local[..., None] * stops[idx + 1]
+    The transition band centered at theta0+pi ramps color0 -> white -> color1
+    using the same smoothstep profile as the trap alpha ramps.
+    """
+    stops = np.asarray(rgbs, dtype=float).reshape(-1, 3)
+    phase = np.mod(np.asarray(theta, dtype=float) - float(theta0), 2.0 * np.pi)
+    if len(stops) != 2:
+        idx = np.minimum(
+            (phase / (2.0 * np.pi) * len(stops)).astype(int),
+            len(stops) - 1,
+        )
+        return stops[idx]
+
+    white = np.ones(3, dtype=float)
+    half_width = np.pi / 9.0
+    rgb = np.empty(phase.shape + (3,), dtype=float)
+
+    orange_side = phase <= np.pi - half_width
+    yellow_side = phase >= np.pi + half_width
+    lower_ramp = (phase > np.pi - half_width) & (phase <= np.pi)
+    upper_ramp = (phase > np.pi) & (phase < np.pi + half_width)
+
+    rgb[orange_side] = stops[0]
+    rgb[yellow_side] = stops[1]
+    if np.any(lower_ramp):
+        u = _smoothstep((phase[lower_ramp] - (np.pi - half_width)) / half_width)
+        rgb[lower_ramp] = (1.0 - u)[:, None] * stops[0] + u[:, None] * white
+    if np.any(upper_ramp):
+        u = _smoothstep((phase[upper_ramp] - np.pi) / half_width)
+        rgb[upper_ramp] = (1.0 - u)[:, None] * white + u[:, None] * stops[1]
+    return rgb
 
 
 def _draw_loss_cross(
@@ -388,6 +420,42 @@ def _draw_planar_circle_outline(
         line.set_sort_zpos(z_draw if sort_zpos is None else float(sort_zpos))
     except AttributeError:
         pass
+
+
+def _draw_planar_cross(
+    ax: Any,
+    center_xy: Sequence[float],
+    z: float,
+    size: float,
+    color: Any,
+    lw: float,
+    alpha: float,
+    z_offset: float = 0.0,
+    sort_zpos: float | None = None,
+) -> None:
+    """Draw an in-plane X centered on an xy point."""
+    if size <= 0.0:
+        return
+    cx, cy = np.asarray(center_xy, dtype=float)
+    z_draw = float(z) + float(z_offset)
+    r, g, b, a = to_rgba(color)
+    rgba = (r, g, b, a * alpha)
+    half = 0.5 * float(size)
+    for sx, sy in ((1.0, 1.0), (1.0, -1.0)):
+        line, = ax.plot(
+            [cx - sx * half, cx + sx * half],
+            [cy - sy * half, cy + sy * half],
+            [z_draw, z_draw],
+            color=rgba,
+            lw=lw,
+            solid_capstyle="round",
+        )
+        try:
+            line.set_sort_zpos(
+                z_draw if sort_zpos is None else float(sort_zpos)
+            )
+        except AttributeError:
+            pass
 
 
 def _draw_planar_discs(
@@ -613,6 +681,36 @@ def draw_stack_time(
     )
     bottom_traj_width = max(0.006 * d, 0.018 * float(s.bottom_traj_lw) * d)
     bottom_marker_draws: list[tuple[np.ndarray, float, list[Any], list[Any], float]] = []
+    loss_target_cross_size = (
+        2.0 * atom_radius * max(0.0, float(s.loss_target_cross_size_frac))
+    )
+    loss_targets_by_layer: dict[int, list[np.ndarray]] = {}
+    bottom_loss_points: list[np.ndarray] = []
+
+    def _lost_positions(atom: Any) -> tuple[np.ndarray, np.ndarray] | None:
+        if atom.lost_at is None:
+            return None
+        lost_at = float(atom.lost_at)
+        loss_pos = np.asarray(atom.position_at(lost_at), dtype=float)
+        for seg in atom.segments:
+            if (
+                seg.duration > 0
+                and seg.start_time - 1e-12 <= lost_at <= seg.end_time + 1e-12
+            ):
+                return loss_pos, np.asarray(seg.end_pos, dtype=float)
+        return loss_pos, loss_pos
+
+    for atom in ensemble.atomtrajs:
+        lost_positions = _lost_positions(atom)
+        if lost_positions is None:
+            continue
+        loss_ij, target_ij = lost_positions
+        target_xy = grid.ij_to_xy(target_ij)
+        bottom_loss_points.append(grid.ij_to_xy(loss_ij))
+        for layer_idx, layer_t in enumerate(t_arr):
+            if layer_t > float(atom.lost_at) + 1e-12:
+                loss_targets_by_layer.setdefault(layer_idx, []).append(target_xy)
+                break
 
     # --- bottom plate: row/col-colored extending lattice lines + xy
     #     trajectory projections at z=0. The "grid" on the bottom uses
@@ -816,6 +914,19 @@ def draw_stack_time(
             10.0 * s.layer_spacing,
         )
 
+    for loss_xy in bottom_loss_points:
+        _draw_planar_cross(
+            ax,
+            loss_xy,
+            bottom_marker_z,
+            loss_target_cross_size,
+            s.loss_target_cross_color,
+            s.loss_target_cross_lw,
+            s.loss_target_cross_alpha,
+            0.0,
+            10.0 * s.layer_spacing + 0.2,
+        )
+
     if show_trap_event_guides and show_traps:
         event_points: list[tuple[float, float, float]] = []
         seen_events: set[tuple[int, int, int]] = set()
@@ -920,7 +1031,7 @@ def draw_stack_time(
                     ax,
                     target_xy,
                     z,
-                    max(0.0, s.motion_target_circle_radius_frac) * d,
+                    atom_radius,
                     s.motion_target_circle_color,
                     s.motion_target_circle_lw,
                     s.motion_target_circle_alpha * layer_alpha,
@@ -928,6 +1039,33 @@ def draw_stack_time(
                     s.motion_target_circle_dashes,
                     s.motion_target_circle_z_offset,
                     float(z) + s.motion_target_circle_z_offset,
+                )
+
+        if show_motion_targets:
+            for target_xy in loss_targets_by_layer.get(i, []):
+                _draw_planar_circle_outline(
+                    ax,
+                    target_xy,
+                    z,
+                    atom_radius,
+                    s.motion_target_circle_color,
+                    s.motion_target_circle_lw,
+                    s.motion_target_circle_alpha * layer_alpha,
+                    s.motion_target_circle_segments,
+                    s.motion_target_circle_dashes,
+                    s.motion_target_circle_z_offset,
+                    float(z) + s.motion_target_circle_z_offset,
+                )
+                _draw_planar_cross(
+                    ax,
+                    target_xy,
+                    z,
+                    loss_target_cross_size,
+                    s.loss_target_cross_color,
+                    s.loss_target_cross_lw,
+                    s.loss_target_cross_alpha * layer_alpha,
+                    s.loss_target_cross_z_offset,
+                    float(z) + s.loss_target_cross_z_offset,
                 )
 
         edge_r, edge_g, edge_b, edge_a = to_rgba(s.atom_edge_color)
@@ -1056,6 +1194,7 @@ def draw_stack_time(
             ax, xy, zs, wall_alpha, trap_radius,
             [to_rgb(c) for c in _colorway(channel_color)], s.tube_facets,
             sort_zpos=float(np.mean(zs)) + 0.04 * s.layer_spacing,
+            theta0=s.trap_two_tone_theta,
         )
 
     def _draw_trajectory_in_range(t_lo: float, t_hi: float) -> None:
@@ -1091,7 +1230,7 @@ def draw_stack_time(
                 [atom.position_at(float(tk)) for tk in ts], dtype=float,
             )
             xy = grid.ij_to_xy(ij)
-            zs = t_to_z(ts)
+            zs = t_to_z(ts) + s.trajectory_z_offset
             points = np.stack([xy[:, 0], xy[:, 1], zs], axis=1)
             segs = np.stack([points[:-1], points[1:]], axis=1)
             seg_colors = []
@@ -1105,7 +1244,7 @@ def draw_stack_time(
             )
             ax.add_collection3d(lc)
             try:
-                lc.set_sort_zpos(float(np.mean(zs)) - 0.04 * s.layer_spacing)
+                lc.set_sort_zpos(float(np.max(zs)) + 0.02 * s.layer_spacing)
             except AttributeError:
                 pass
 
@@ -1165,19 +1304,20 @@ def draw_stack_time(
 
 
 def _draw_trap_tube(
-    ax, centers_xy, zs_along, wall_alpha, radius, rgb, facets, *, sort_zpos=None,
+    ax, centers_xy, zs_along, wall_alpha, radius, rgb, facets, *,
+    sort_zpos=None, theta0: float = 0.0,
 ):
     """Render one trap as a 3D tube whose wall alpha varies along z.
 
-    Multiple RGB stops are blended left-to-right around the tube cross-section
-    with a smoothstep transition, so a two-tone Raman gate reads as two fields
-    present at once rather than a rapid stripe pattern.
+    A two-color channel renders as an angular split: theta in
+    [theta0, theta0 + pi] uses color 0, the opposite half uses color 1, and
+    the neighborhood of theta0 + pi ramps through white.
     """
     n_along = len(centers_xy)
     if n_along < 2:
         return
     rgbs = np.asarray(rgb, dtype=float).reshape(-1, 3)
-    angles = np.linspace(0.0, 2.0 * np.pi, facets)
+    angles = float(theta0) + np.linspace(0.0, 2.0 * np.pi, facets)
     cos_a = np.cos(angles)[None, :]
     sin_a = np.sin(angles)[None, :]
     xs = centers_xy[:, 0:1] + radius * cos_a
@@ -1193,9 +1333,10 @@ def _draw_trap_tube(
         facecolors[..., 1] = rgbs[0, 1]
         facecolors[..., 2] = rgbs[0, 2]
     else:
-        face_x = 0.5 * (np.cos(angles[:-1]) + np.cos(angles[1:]))
-        side_u = 0.5 * (face_x + 1.0)
-        facecolors[..., :3] = _smooth_colorway_rgbs(rgbs, side_u)[None, :, :]
+        face_theta = 0.5 * (angles[:-1] + angles[1:])
+        facecolors[..., :3] = _angular_two_tone_rgbs(
+            rgbs, face_theta, theta0,
+        )[None, :, :]
     facecolors[..., 3] = face_alpha[:, None]
     surf = ax.plot_surface(
         xs, ys, zs_grid, facecolors=facecolors, shade=False,
