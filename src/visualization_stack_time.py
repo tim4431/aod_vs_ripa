@@ -1,20 +1,24 @@
 """Time-stacked 3D visualization for atom rearrangement motion.
 
 Stacks time slices of an `AtomEnsemble` / `MovingSequence` along z, with
-t=0 at the top and t=t_max at the bottom. Atoms are 2D cross-section
+t=0 at the bottom and t=t_max at the top. Atoms are 2D cross-section
 discs on every layer; trap motion can render as 3D tubes; a continuous
 trajectory polyline threads through the stack between layers; per-layer
 alpha gives a "depth of time" cue.
 
 All visual styling — view angle, colors, sizes, alphas, layer planes,
-arrows, traps, and projections — lives on the `StackTimeStyle` dataclass.
-Pass a custom `style=` to change the look without touching the module.
+arrows, traps — lives on the `StackTimeStyle` dataclass. The optional
+projection plate (a "ground" plane above the latest-time layer that
+shows trajectory / trap / grid summaries for the whole run) is styled
+separately via `ProjectPlaneStyle` and passed to the drawing functions
+as `project_plane=...`. Pass custom styles to change the look without
+touching the module.
 
 Top-level entry points:
 
-    `draw_stack_time(ax, motion, t_values, *, style=..., ...)`
-    `draw_stack_time_frame(motion, t_values, *, style=..., ...)`
-    `save_stack_time(motion, t_values, output_path, *, style=..., ...)`
+    `draw_stack_time(ax, motion, t_values, *, style=..., project_plane=..., ...)`
+    `draw_stack_time_frame(motion, t_values, *, style=..., project_plane=..., ...)`
+    `save_stack_time(motion, t_values, output_path, *, style=..., project_plane=..., ...)`
 """
 
 from __future__ import annotations
@@ -162,36 +166,21 @@ class StackTimeStyle:
     trap_samples_per_segment: int = 36
     tube_facets: int = 128
 
+    # Idle trap tube: drawn for time intervals where an atom has no
+    # active segment (no row/col move, no aod, no stationary gate).
+    # The atom is stationary during idle, so the tube is a vertical
+    # gray cylinder threading through the slab between layers.
+    idle_trap_color: Any = "#9a9a9a"
+    idle_trap_alpha: float = 0.4
+    idle_trap_radius_frac: float | None = None  # None inherits trap_radius_frac
+    idle_trap_samples_per_segment: int = 16
+
     # Trajectory polylines through the stack
     trajectory_lw: float = 1.4
     trajectory_alpha: float = 0.7
     trajectory_darken: float = 0.65
     trajectory_samples_per_segment: int = 24
     trajectory_z_offset: float = 0.06
-
-    # Bottom plate grid lines
-    bottom_plane_color: Any | None = None
-    bottom_plane_alpha: float = 0.20
-    bottom_grid_color: Any = "#9a9a9a"
-    bottom_grid_lw: float = 0.6
-    bottom_grid_alpha: float = 0.55
-
-    # Bottom plate trajectory projections
-    bottom_traj_lw: float = 2.0
-    bottom_traj_alpha: float = 0.85
-    bottom_traj_samples_per_segment: int = 24
-
-    # Bottom plate trap projections
-    bottom_trap_lw: float = 5.0
-    bottom_trap_alpha: float = 0.18
-    bottom_trap_samples_per_segment: int = 36
-    bottom_trap_width_frac: float = 0.14
-    bottom_trap_arrow_length_frac: float = 0.38
-    bottom_trap_arrow_lw: float = 1.1
-    bottom_trap_arrow_alpha: float = 0.88
-    bottom_trap_arrow_head_length_frac: float = 0.13
-    bottom_trap_arrow_head_width_frac: float = 0.16
-    bottom_trap_arrow_z_offset: float = 0.02
 
     # 2D ground-plane gate blobs (single-qubit rotations rendered as a
     # Gaussian glow at the atom's site). Single-color channels render
@@ -213,6 +202,54 @@ class StackTimeStyle:
 
 
 DEFAULT_STYLE = StackTimeStyle()
+
+
+@dataclass
+class ProjectPlaneStyle:
+    """Visual styling for the projection plate.
+
+    The plate is a translucent rectangular surface drawn above the
+    latest-time layer of a stack-time render. Trajectories, traps, and
+    the row/col grid can be projected onto it as a summary view of the
+    whole run. The four `show_*` flags pick which projections render;
+    the rest are appearance knobs (color, alpha, line width, etc.).
+    """
+
+    # Render toggles
+    show_plane: bool = False
+    show_grid: bool = True
+    show_traps: bool = False
+    show_trajectory: bool = True
+
+    # Translucent plate surface. `plane_color=None` inherits
+    # `StackTimeStyle.layer_plane_color`.
+    plane_color: Any | None = None
+    plane_alpha: float = 0.20
+
+    # Row/col grid lines on the plate.
+    grid_color: Any = "#9a9a9a"
+    grid_lw: float = 0.6
+    grid_alpha: float = 0.55
+
+    # Atom xy trajectory polylines projected onto the plate.
+    traj_lw: float = 2.0
+    traj_alpha: float = 0.85
+    traj_samples_per_segment: int = 24
+
+    # Trap motion bars projected onto the plate.
+    trap_lw: float = 5.0
+    trap_alpha: float = 0.18
+    trap_samples_per_segment: int = 36
+    trap_width_frac: float = 0.14
+    trap_arrow_length_frac: float = 0.38
+    trap_arrow_lw: float = 1.1
+    trap_arrow_alpha: float = 0.88
+    trap_arrow_head_length_frac: float = 0.13
+    trap_arrow_head_width_frac: float = 0.16
+    trap_arrow_z_offset: float = 0.02
+
+
+DEFAULT_PROJECT_PLANE = ProjectPlaneStyle()
 
 
 def _smoothstep(x: np.ndarray) -> np.ndarray:
@@ -560,28 +597,32 @@ def draw_stack_time(
     *,
     atom_colors: Mapping[int, Any] | Iterable[Any] | None = None,
     show_traps: bool = True,
+    show_idle_traps: bool = False,
     show_layer_plane: bool = False,
     show_motion_arrows: bool = False,
     show_motion_targets: bool = False,
     show_trajectory: bool = True,
-    show_bottom_plane: bool = False,
-    show_bottom_grid: bool = True,
-    show_bottom_traps: bool = False,
-    show_bottom_trajectory: bool = True,
     show_trap_event_guides: bool = False,
     show_layers: bool = True,
+    show_project_plane: bool = True,
     style: StackTimeStyle | None = None,
+    project_plane: ProjectPlaneStyle | None = None,
     title: str | None = None,
 ) -> None:
     """Draw a time-stacked 3D figure of `motion` on a 3D `ax`.
 
-    `style` selects visual parameters. The remaining `show_*` flags cover
-    major layers of the current illustration. Set `show_layers=False` to
-    suppress the upper time-slice layers (atoms, layer plane, motion
-    arrows / targets, trajectory polylines) so only the bottom plate
-    renders — useful for ground-plane-only frames in a 3D camera.
+    `style` selects stack visual parameters; `project_plane` selects the
+    projection-plate styling (a "ground" plate drawn above the latest-
+    time layer that summarizes trajectories, traps, and the row/col
+    grid for the whole run). The remaining `show_*` flags cover major
+    layers of the stack itself. Set `show_layers=False` to suppress the
+    time-slice layers (atoms, layer plane, motion arrows / targets,
+    trajectory polylines) so only the projection plate renders;
+    set `show_project_plane=False` to suppress the projection plate
+    entirely (overrides the per-element flags on `project_plane`).
     """
     s = style if style is not None else DEFAULT_STYLE
+    pp = project_plane if project_plane is not None else DEFAULT_PROJECT_PLANE
     ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
 
     # Matplotlib's automatic 3D z-sort uses min(projected_zs) for
@@ -614,8 +655,8 @@ def draw_stack_time(
     line_hi = site_hi + s.lattice_line_extension_frac * d
     plane_lo = site_lo - s.layer_plane_extension_frac * d
     plane_hi = site_hi + s.layer_plane_extension_frac * d
-    bottom_plane_lo = min(plane_lo, line_lo)
-    bottom_plane_hi = max(plane_hi, line_hi)
+    proj_plane_lo = min(plane_lo, line_lo)
+    proj_plane_hi = max(plane_hi, line_hi)
 
     # Auto-expand xy bounds to include any segment endpoints / initial
     # positions that fall outside the lattice.
@@ -632,25 +673,14 @@ def draw_stack_time(
             xy_lo = min(xy_lo, float(x) - margin, float(y) - margin)
             xy_hi = max(xy_hi, float(x) + margin, float(y) + margin)
 
-    # When the bottom plate is enabled, lift the whole stack by one
-    # `layer_spacing` so the bottom layer doesn't share z=0 with the
-    # plate (would otherwise z-fight). Top layer (smallest t) ends up
-    # at the largest z; layers descend with increasing t.
-    z_floor = (
-        s.layer_spacing
-        if (
-            show_bottom_plane
-            or show_bottom_grid
-            or show_bottom_traps
-            or show_bottom_trajectory
-        )
-        else 0.0
+    # Bottom of the stack is the earliest time (lowest z), top is the
+    # latest time (highest z). Layers ascend with increasing t.
+    project_any = show_project_plane and (
+        pp.show_plane or pp.show_grid or pp.show_traps or pp.show_trajectory
     )
-    layer_zs = [
-        z_floor + (n_layers - 1 - i) * s.layer_spacing for i in range(n_layers)
-    ]
-    z_top = float(layer_zs[0])
-    z_bot = float(layer_zs[-1])
+    layer_zs = [i * s.layer_spacing for i in range(n_layers)]
+    z_bot = float(layer_zs[0])
+    z_top = float(layer_zs[-1])
     z_max = max(z_top, 1.0)
     t_min, t_max = t_arr[0], t_arr[-1]
 
@@ -679,11 +709,14 @@ def draw_stack_time(
 
     def t_to_z(ts: np.ndarray) -> np.ndarray:
         if t_max <= t_min:
-            return np.full_like(np.asarray(ts, dtype=float), z_top)
-        return z_top + (z_bot - z_top) * (
+            return np.full_like(np.asarray(ts, dtype=float), z_bot)
+        return z_bot + (z_top - z_bot) * (
             (np.asarray(ts, dtype=float) - t_min) / (t_max - t_min)
         )
 
+    # Latest time (top layer) is fully opaque; earlier times fade toward
+    # `layer_alpha_floor`. layer_zs is ascending in t, so the same formula
+    # over i works (i=n-1 latest → alpha=1).
     if n_layers == 1:
         layer_alphas = [1.0]
     else:
@@ -696,7 +729,7 @@ def draw_stack_time(
     def alpha_at_z(z: float | np.ndarray) -> np.ndarray | float:
         if z_top <= z_bot:
             return 1.0
-        frac = (z_top - np.asarray(z, dtype=float)) / (z_top - z_bot)
+        frac = (np.asarray(z, dtype=float) - z_bot) / (z_top - z_bot)
         return s.layer_alpha_floor + (1.0 - s.layer_alpha_floor) * frac
 
     def channel_at_time(atom: Any, t: float, eps: float = 1e-9) -> Any:
@@ -714,23 +747,28 @@ def draw_stack_time(
         )
         return _darken(_blend_colorway(color_spec), s.trajectory_darken)
 
-    bottom_atom_z = max(float(s.atom_plane_z_offset), 1e-6)
-    bottom_grid_z = 0.20 * bottom_atom_z
-    bottom_trap_z = 0.45 * bottom_atom_z
-    bottom_traj_z = 0.70 * bottom_atom_z
-    bottom_marker_z = 1.40 * bottom_atom_z
-    bottom_trap_width = max(
+    # The projection plate sits one `layer_spacing` above the latest-time
+    # layer when the time stack is rendered. In single-frame mode
+    # (`show_layers=False`) the plate is the only visual, so anchor it at
+    # z=0 to match the framing of a pure ground-plane render.
+    proj_plane_base = (z_top + s.layer_spacing) if show_layers else 0.0
+    proj_atom_z_offset = max(float(s.atom_plane_z_offset), 1e-6)
+    proj_grid_z = proj_plane_base + 0.20 * proj_atom_z_offset
+    proj_trap_z = proj_plane_base + 0.45 * proj_atom_z_offset
+    proj_traj_z = proj_plane_base + 0.70 * proj_atom_z_offset
+    proj_marker_z = proj_plane_base + 1.40 * proj_atom_z_offset
+    proj_trap_width = max(
         0.006 * d,
-        float(s.bottom_trap_width_frac) * d,
-        0.018 * float(s.bottom_trap_lw) * d,
+        float(pp.trap_width_frac) * d,
+        0.018 * float(pp.trap_lw) * d,
     )
-    bottom_traj_width = max(0.006 * d, 0.018 * float(s.bottom_traj_lw) * d)
-    bottom_marker_draws: list[tuple[np.ndarray, float, list[Any], list[Any], float]] = []
+    proj_traj_width = max(0.006 * d, 0.018 * float(pp.traj_lw) * d)
+    proj_marker_draws: list[tuple[np.ndarray, float, list[Any], list[Any], float]] = []
     loss_target_cross_size = (
         2.0 * atom_radius * max(0.0, float(s.loss_target_cross_size_frac))
     )
     loss_targets_by_layer: dict[int, list[np.ndarray]] = {}
-    bottom_loss_points: list[np.ndarray] = []
+    proj_loss_points: list[np.ndarray] = []
 
     def _lost_positions(atom: Any) -> tuple[np.ndarray, np.ndarray] | None:
         if atom.lost_at is None:
@@ -751,65 +789,65 @@ def draw_stack_time(
             continue
         loss_ij, target_ij = lost_positions
         target_xy = grid.ij_to_xy(target_ij)
-        bottom_loss_points.append(grid.ij_to_xy(loss_ij))
+        proj_loss_points.append(grid.ij_to_xy(loss_ij))
         for layer_idx, layer_t in enumerate(t_arr):
             if layer_t > float(atom.lost_at) + 1e-12:
                 loss_targets_by_layer.setdefault(layer_idx, []).append(target_xy)
                 break
 
-    # --- bottom plate: row/col-colored extending lattice lines + xy
-    #     trajectory projections at z=0. The "grid" on the bottom uses
+    # --- projection plate: row/col-colored extending lattice lines + xy
+    #     trajectory projections at `proj_plane_base`. The "grid" uses
     #     the same row/col color rule as the layer lattice lines, but
-    #     with the bottom-plate styling (alpha, lw).
-    if show_bottom_plane:
+    #     with the plate styling (alpha, lw).
+    if show_project_plane and pp.show_plane:
         xx = np.array(
-            [[bottom_plane_lo, bottom_plane_hi],
-             [bottom_plane_lo, bottom_plane_hi]]
+            [[proj_plane_lo, proj_plane_hi],
+             [proj_plane_lo, proj_plane_hi]]
         )
         yy = np.array(
-            [[bottom_plane_lo, bottom_plane_lo],
-             [bottom_plane_hi, bottom_plane_hi]]
+            [[proj_plane_lo, proj_plane_lo],
+             [proj_plane_hi, proj_plane_hi]]
         )
-        zz = np.zeros_like(xx, dtype=float)
+        zz = np.full_like(xx, proj_plane_base, dtype=float)
         surf = ax.plot_surface(
             xx, yy, zz,
             color=(
                 s.layer_plane_color
-                if s.bottom_plane_color is None
-                else s.bottom_plane_color
+                if pp.plane_color is None
+                else pp.plane_color
             ),
-            alpha=s.bottom_plane_alpha,
+            alpha=pp.plane_alpha,
             shade=False,
             linewidth=0,
             edgecolor="none",
             antialiased=False,
         )
         try:
-            surf.set_sort_zpos(-0.02 * s.layer_spacing)
+            surf.set_sort_zpos(proj_plane_base - 0.02 * s.layer_spacing)
         except AttributeError:
             pass
 
-    if show_bottom_grid:
+    if show_project_plane and pp.show_grid:
         bot_row_color = to_rgba(s.lattice_line_colors.get("row", "#ff2828"))
         bot_col_color = to_rgba(s.lattice_line_colors.get("col", "#29b0ff"))
         for jj in range(grid.N):
             y_row = (jj - grid.center) * d
             ax.plot(
-                [line_lo, line_hi], [y_row, y_row], [bottom_grid_z, bottom_grid_z],
-                color=bot_row_color, lw=s.bottom_grid_lw,
-                alpha=s.bottom_grid_alpha,
+                [line_lo, line_hi], [y_row, y_row], [proj_grid_z, proj_grid_z],
+                color=bot_row_color, lw=pp.grid_lw,
+                alpha=pp.grid_alpha,
                 solid_capstyle="round",
             )
         for ii in range(grid.N):
             x_col = (ii - grid.center) * d
             ax.plot(
-                [x_col, x_col], [line_lo, line_hi], [bottom_grid_z, bottom_grid_z],
-                color=bot_col_color, lw=s.bottom_grid_lw,
-                alpha=s.bottom_grid_alpha,
+                [x_col, x_col], [line_lo, line_hi], [proj_grid_z, proj_grid_z],
+                color=bot_col_color, lw=pp.grid_lw,
+                alpha=pp.grid_alpha,
                 solid_capstyle="round",
             )
 
-    if show_bottom_traps and show_traps:
+    if show_project_plane and pp.show_traps and show_traps:
         single_time = t_max <= t_min
         for atom in ensemble.atomtrajs:
             for seg in atom.segments:
@@ -850,12 +888,12 @@ def draw_stack_time(
                     ax,
                     xy[0],
                     xy[1],
-                    bottom_trap_z,
-                    bottom_trap_width,
-                    (r, g, b, s.bottom_trap_alpha),
-                    sort_zpos=bottom_trap_z,
+                    proj_trap_z,
+                    proj_trap_width,
+                    (r, g, b, pp.trap_alpha),
+                    sort_zpos=proj_trap_z,
                 )
-                arrow_len = max(0.0, float(s.bottom_trap_arrow_length_frac)) * d
+                arrow_len = max(0.0, float(pp.trap_arrow_length_frac)) * d
                 if arrow_len > 0.0:
                     direction = xy[1] - xy[0]
                     direction_norm = float(np.hypot(direction[0], direction[1]))
@@ -869,24 +907,24 @@ def draw_stack_time(
                             ax,
                             float(arrow_start[0]),
                             float(arrow_start[1]),
-                            bottom_trap_z,
+                            proj_trap_z,
                             ux,
                             uy,
                             arrow_len,
                             arrow_color,
-                            s.bottom_trap_arrow_lw,
-                            s.bottom_trap_arrow_alpha,
+                            pp.trap_arrow_lw,
+                            pp.trap_arrow_alpha,
                             min(
-                                max(0.0, s.bottom_trap_arrow_head_length_frac) * d,
+                                max(0.0, pp.trap_arrow_head_length_frac) * d,
                                 0.45 * arrow_len,
                             ),
-                            max(0.0, s.bottom_trap_arrow_head_width_frac) * d,
+                            max(0.0, pp.trap_arrow_head_width_frac) * d,
                             0.0,
-                            s.bottom_trap_arrow_z_offset,
-                            bottom_trap_z + s.bottom_trap_arrow_z_offset,
+                            pp.trap_arrow_z_offset,
+                            proj_trap_z + pp.trap_arrow_z_offset,
                         )
 
-    if show_bottom_trajectory and t_max > t_min:
+    if show_project_plane and pp.show_trajectory and t_max > t_min:
         fresh_rgba = to_rgba(s.fresh_atom_color)
 
         for idx, atom in enumerate(ensemble.atomtrajs):
@@ -913,10 +951,10 @@ def draw_stack_time(
                     ax,
                     xy[0],
                     xy[1],
-                    bottom_traj_z,
-                    bottom_traj_width,
-                    (r, g, b, a * s.bottom_traj_alpha),
-                    sort_zpos=bottom_traj_z,
+                    proj_traj_z,
+                    proj_traj_width,
+                    (r, g, b, a * pp.traj_alpha),
+                    sort_zpos=proj_traj_z,
                 )
                 drew_trajectory = True
 
@@ -932,9 +970,9 @@ def draw_stack_time(
             start_color = (
                 fresh_rgba if _is_freshly_loaded(atom, t_min) else normal_rgba
             )
-            bottom_marker_draws.append((
+            proj_marker_draws.append((
                 xy[0:1],
-                bottom_marker_z,
+                proj_marker_z,
                 atom_radius,
                 [to_rgba("white")],
                 [start_color],
@@ -948,16 +986,16 @@ def draw_stack_time(
                 end_color = (
                     fresh_rgba if _is_freshly_loaded(atom, traj_end) else normal_rgba
                 )
-                bottom_marker_draws.append((
+                proj_marker_draws.append((
                     xy[-1:],
-                    bottom_marker_z,
+                    proj_marker_z,
                     atom_radius,
                     [end_color],
                     [to_rgba("white")],
                     0.6,
                 ))
 
-    for centers_xy, z_marker, radius, facecolors, edgecolors, edge_lw in bottom_marker_draws:
+    for centers_xy, z_marker, radius, facecolors, edgecolors, edge_lw in proj_marker_draws:
         _draw_planar_discs(
             ax,
             centers_xy,
@@ -971,10 +1009,10 @@ def draw_stack_time(
             10.0 * s.layer_spacing,
         )
 
-    if show_bottom_plane:
-        for loss_xy in bottom_loss_points:
+    if show_project_plane and pp.show_plane:
+        for loss_xy in proj_loss_points:
             ax.scatter(
-                [float(loss_xy[0])], [float(loss_xy[1])], [bottom_marker_z],
+                [float(loss_xy[0])], [float(loss_xy[1])], [proj_marker_z],
                 s=s.loss_marker_size, c=s.loss_marker_color, marker="x",
                 linewidths=s.loss_marker_lw, depthshade=False,
             )
@@ -1233,6 +1271,67 @@ def draw_stack_time(
             theta0=s.trap_two_tone_theta,
         )
 
+    idle_trap_radius = (
+        trap_radius
+        if s.idle_trap_radius_frac is None
+        else float(s.idle_trap_radius_frac) * d
+    )
+    idle_trap_rgb = [to_rgb(s.idle_trap_color)]
+
+    def _draw_idle_trap_in_range(atom: Any, t_lo: float, t_hi: float) -> None:
+        """Vertical gray trap tube for `atom` over the idle gaps inside
+        [t_lo, t_hi].
+
+        An "idle" interval is any sub-range of [t_lo, t_hi] not covered by
+        a positive-duration segment of `atom` (and not after lost_at).
+        The atom is stationary while idle, so the tube is a cylinder.
+        """
+        if not (show_idle_traps and show_traps):
+            return
+        end_bound = t_hi if atom.lost_at is None else min(t_hi, float(atom.lost_at))
+        if end_bound <= t_lo + 1e-15:
+            return
+        covered: list[tuple[float, float]] = []
+        for seg in atom.segments:
+            if seg.duration <= 0:
+                continue
+            a = max(float(seg.start_time), t_lo)
+            b = min(float(seg.end_time), end_bound)
+            if b > a:
+                covered.append((a, b))
+        covered.sort()
+        merged: list[list[float]] = []
+        for a, b in covered:
+            if merged and a <= merged[-1][1] + 1e-15:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        gaps: list[tuple[float, float]] = []
+        cursor = t_lo
+        for a, b in merged:
+            if a > cursor + 1e-15:
+                gaps.append((cursor, a))
+            cursor = max(cursor, b)
+        if end_bound > cursor + 1e-15:
+            gaps.append((cursor, end_bound))
+        samples_n = max(4, int(s.idle_trap_samples_per_segment))
+        for a, b in gaps:
+            if b - a <= 1e-15:
+                continue
+            ij = np.asarray(atom.position_at(float(a)), dtype=float)
+            xy0 = grid.ij_to_xy(ij)
+            ts = np.linspace(a, b, samples_n)
+            zs = t_to_z(ts)
+            xy_arr = np.tile(xy0.reshape(1, 2), (samples_n, 1))
+            z_alpha = np.asarray(alpha_at_z(zs), dtype=float)
+            wall_alpha = s.idle_trap_alpha * s.trap_max_alpha * z_alpha
+            _draw_trap_tube(
+                ax, xy_arr, zs, wall_alpha, idle_trap_radius,
+                idle_trap_rgb, s.tube_facets,
+                sort_zpos=float(np.mean(zs)),
+                theta0=s.trap_two_tone_theta,
+            )
+
     def _draw_trajectory_in_range(t_lo: float, t_hi: float) -> None:
         if not show_trajectory or n_layers < 2 or t_max <= t_min:
             return
@@ -1281,9 +1380,10 @@ def draw_stack_time(
             ax.add_collection3d(lc)
 
     def _draw_loss_markers_in_range(t_lo: float, t_hi: float) -> None:
-        # When the bottom plate is shown, the loss cross is projected onto
-        # it once; suppress the in-stack copy so we don't render two crosses.
-        if show_bottom_plane:
+        # When the projection plate is shown, the loss cross is projected
+        # onto it once; suppress the in-stack copy so we don't render two
+        # crosses.
+        if show_project_plane and pp.show_plane:
             return
         for atom in ensemble.atomtrajs:
             if atom.lost_at is None:
@@ -1292,20 +1392,21 @@ def draw_stack_time(
                 _draw_loss_cross(ax, atom, grid, t_to_z, s)
 
     # Walk from the bottom-most layer up to the top.
-    # i = n_layers - 1 is at lowest z; i = 0 is at highest z.
+    # i = 0 is at lowest z (earliest); i = n_layers - 1 is at highest z (latest).
     if show_layers:
-        for i in range(n_layers - 1, -1, -1):
-            # Draw the later-time layer first; then draw the slab above it.
-            # On the next iteration the earlier-time layer is drawn, masking
+        for i in range(n_layers):
+            # Draw the earlier-time layer first; then draw the slab above it.
+            # On the next iteration the later-time layer is drawn, masking
             # the trajectory/traps in between.
             _draw_layer(i)
-            if i > 0:
-                t_above_lo = t_arr[i - 1]
-                t_above_hi = t_arr[i]
+            if i + 1 < n_layers:
+                t_above_lo = t_arr[i]
+                t_above_hi = t_arr[i + 1]
                 # Stack order inside each time slab:
-                # later layer < trajectory < traps/loss < earlier layer.
+                # earlier layer < trajectory < traps/loss < later layer.
                 _draw_trajectory_in_range(t_above_lo, t_above_hi)
                 for atom in ensemble.atomtrajs:
+                    _draw_idle_trap_in_range(atom, t_above_lo, t_above_hi)
                     for seg in atom.segments:
                         if seg.end_time <= t_above_lo - 1e-15:
                             continue
@@ -1317,11 +1418,13 @@ def draw_stack_time(
     # --- view + axes ----------------------------------------------------
     if show_layers:
         asp_z = max(1.1, n_layers / 6.0)
-        z_view_max = z_max
+        z_view_max = (
+            proj_marker_z + 0.5 * s.layer_spacing if project_any else z_max
+        )
     else:
-        # Bottom-plate-only view: shrink the z box so the plate fills the
-        # figure instead of floating at the bottom of a tall stack box.
-        z_view_max = max(bottom_marker_z * 4.0, 1e-3)
+        # Projection-plate-only view: shrink the z box so the plate fills
+        # the figure instead of floating in a tall stack box.
+        z_view_max = max(proj_marker_z * 4.0, 1e-3)
         asp_z = 0.18
     ax.set_xlim(xy_lo, xy_hi)
     ax.set_ylim(xy_lo, xy_hi)
@@ -1698,15 +1801,19 @@ def draw_ground_plane_2d(
     show_plane: bool = False,
     show_loss_cross: bool = True,
     style: StackTimeStyle | None = None,
+    project_plane: ProjectPlaneStyle | None = None,
     title: str | None = None,
 ) -> None:
     """Draw a single timestep as a 2D top-down ground-plane figure.
 
-    Reuses the StackTimeStyle knobs that drive the 3D bottom plate
-    (bottom_grid_*, bottom_trap_*, motion_target_circle_*, atom_*) so the
-    look matches the existing bottom-plate styling.
+    Reuses the StackTimeStyle knobs that drive the 3D stack styling
+    (motion_target_circle_*, atom_*, gate_blob_*, etc.) plus the
+    ProjectPlaneStyle knobs that drive the projection plate (grid, trap
+    bars with arrowheads, plate alpha) so the look matches the 3D
+    projection-plate rendering.
     """
     s = style if style is not None else DEFAULT_STYLE
+    pp = project_plane if project_plane is not None else DEFAULT_PROJECT_PLANE
     ensemble = motion if isinstance(motion, AtomEnsemble) else motion.ensemble
     t = float(t)
 
@@ -1725,10 +1832,10 @@ def draw_ground_plane_2d(
     plane_hi = site_hi + s.layer_plane_extension_frac * d
     bound_lo = min(plane_lo, line_lo)
     bound_hi = max(plane_hi, line_hi)
-    bottom_trap_width = max(
+    proj_trap_width_2d = max(
         0.006 * d,
-        float(s.bottom_trap_width_frac) * d,
-        0.018 * float(s.bottom_trap_lw) * d,
+        float(pp.trap_width_frac) * d,
+        0.018 * float(pp.trap_lw) * d,
     )
 
     # Auto-expand bounds for off-lattice endpoints (fresh-load reservoirs).
@@ -1745,8 +1852,8 @@ def draw_ground_plane_2d(
 
     plane_color = (
         s.layer_plane_color
-        if s.bottom_plane_color is None
-        else s.bottom_plane_color
+        if pp.plane_color is None
+        else pp.plane_color
     )
 
     # Layer order (lowest -> highest matplotlib zorder):
@@ -1768,7 +1875,7 @@ def draw_ground_plane_2d(
             ],
             closed=True,
             facecolor=plane_color,
-            alpha=s.bottom_plane_alpha,
+            alpha=pp.plane_alpha,
             edgecolor="none",
             linewidth=0,
             zorder=Z_PLANE,
@@ -1781,22 +1888,22 @@ def draw_ground_plane_2d(
             y_row = (jj - grid.center) * d
             ax.plot(
                 [line_lo, line_hi], [y_row, y_row],
-                color=bot_row_color, lw=s.bottom_grid_lw,
-                alpha=s.bottom_grid_alpha, solid_capstyle="round",
+                color=bot_row_color, lw=pp.grid_lw,
+                alpha=pp.grid_alpha, solid_capstyle="round",
                 zorder=Z_GRID,
             )
         for ii in range(grid.N):
             x_col = (ii - grid.center) * d
             ax.plot(
                 [x_col, x_col], [line_lo, line_hi],
-                color=bot_col_color, lw=s.bottom_grid_lw,
-                alpha=s.bottom_grid_alpha, solid_capstyle="round",
+                color=bot_col_color, lw=pp.grid_lw,
+                alpha=pp.grid_alpha, solid_capstyle="round",
                 zorder=Z_GRID,
             )
 
     # Currently-active trap segments. Non-zero displacement renders as a
-    # thick colored bar with arrowhead (mirrors `show_bottom_traps` in
-    # `draw_stack_time`); zero-displacement segments are stationary
+    # thick colored bar with arrowhead (mirrors `project_plane.show_traps`
+    # in `draw_stack_time`); zero-displacement segments are stationary
     # single-qubit gates and render as a Gaussian glow at the atom's site.
     if show_traps:
         gate_blob_radius = float(s.gate_blob_radius_frac) * d
@@ -1838,11 +1945,11 @@ def draw_ground_plane_2d(
                 continue
             r, g, b, _ = _blend_colorway(color_spec)
             _draw_planar_segment_strip_2d(
-                ax, xy0, xy1, bottom_trap_width,
-                (r, g, b, s.bottom_trap_alpha),
+                ax, xy0, xy1, proj_trap_width_2d,
+                (r, g, b, pp.trap_alpha),
                 zorder=Z_TRAP,
             )
-            arrow_len = max(0.0, float(s.bottom_trap_arrow_length_frac)) * d
+            arrow_len = max(0.0, float(pp.trap_arrow_length_frac)) * d
             if arrow_len > 0.0:
                 direction = xy1 - xy0
                 norm = float(np.hypot(direction[0], direction[1]))
@@ -1856,13 +1963,13 @@ def draw_ground_plane_2d(
                         ax,
                         float(arrow_start[0]), float(arrow_start[1]),
                         ux, uy, arrow_len, arrow_color,
-                        s.bottom_trap_arrow_lw,
-                        s.bottom_trap_arrow_alpha,
+                        pp.trap_arrow_lw,
+                        pp.trap_arrow_alpha,
                         min(
-                            max(0.0, s.bottom_trap_arrow_head_length_frac) * d,
+                            max(0.0, pp.trap_arrow_head_length_frac) * d,
                             0.45 * arrow_len,
                         ),
-                        max(0.0, s.bottom_trap_arrow_head_width_frac) * d,
+                        max(0.0, pp.trap_arrow_head_width_frac) * d,
                         0.0,
                         zorder=Z_TRAP,
                     )

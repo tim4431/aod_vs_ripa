@@ -36,6 +36,7 @@ from src.movement import PHYS_A_MAX, grid_accel_from_phys
 from src.segments import make_hold, make_smooth_segment, min_jerk_duration
 
 from src.visualization_stack_time import (
+    ProjectPlaneStyle,
     StackTimeStyle,
     save_ground_plane_2d,
     save_stack_time,
@@ -98,12 +99,19 @@ def save_per_timestep_frames_3d(
 ):
     """Render one 3D-looking PNG per timestep.
 
-    Calls `save_stack_time` with a single-element `t_values=[t]` and all
-    `show_bottom_*=True`, so each frame shows the current-time layer above
-    its full projected trap trajectory on the bottom plate.
+    Calls `save_stack_time` with a single-element `t_values=[t]` and a
+    `ProjectPlaneStyle` with every projection enabled, so each frame
+    shows the current-time layer alongside its full projected trap
+    trajectory on the plate.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    project_plane = ProjectPlaneStyle(
+        show_plane=True,
+        show_grid=True,
+        show_traps=True,
+        show_trajectory=True,
+    )
     paths = []
     for idx, t in enumerate(t_values):
         out = output_dir / filename_template.format(idx=idx, t=float(t))
@@ -112,6 +120,7 @@ def save_per_timestep_frames_3d(
             [float(t)],
             out,
             style=style,
+            project_plane=project_plane,
             atom_colors=atom_colors,
             show_traps=True,
             show_layers=False,
@@ -119,10 +128,6 @@ def save_per_timestep_frames_3d(
             show_motion_arrows=False,
             show_motion_targets=False,
             show_trajectory=False,
-            show_bottom_plane=True,
-            show_bottom_grid=True,
-            show_bottom_traps=True,
-            show_bottom_trajectory=True,
             show_trap_event_guides=False,
             transparent=False,
         )
@@ -139,13 +144,13 @@ def main() -> None:
     # addressed after the loss is detected at t=t0.
     config = AtomConfig(positions=np.asarray(
         [
-            (1, 1),
-            (0, 3),
-            (3, 4),
-            (3, 2),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+            (2, 2),
             (5, 3),
-            (5,4),
-            (5,5)
+            (5, 4),
+            (5, 5)
         ]
     ))
     ensemble = AtomEnsemble.from_config(grid, config)
@@ -157,16 +162,16 @@ def main() -> None:
     # Phase 1: 0..t0 - four parallel RIPA moves. Atom 2 is lost mid-flight.
     ensemble.append_segments_batch([
         (0, make_smooth_segment(
-            (1, 1), (1, 2), 0.0, duration=t0, channel="col",
+            (1, 2), (0, 2), 0.0, duration=t0, channel="row",
         )),
         (1, make_smooth_segment(
-            (0, 3), (1, 3), 0.0, duration=t0, channel="row",
+            (1, 3), (1, 4), 0.0, duration=t0, channel="col",
         )),
         (2, make_smooth_segment(
-            (3, 4), (3, 3), 0.0, duration=t0, channel="col",
+            (2, 3), (3, 3), 0.0, duration=t0, channel="row",
         )),
         (3, make_smooth_segment(
-            (3, 2), (2, 2), 0.0, duration=t0, channel="row",
+            (2, 2), (2, 1), 0.0, duration=t0, channel="col",
         )),
     ])
     lost_at = 0.5 * t0
@@ -175,8 +180,8 @@ def main() -> None:
     # Phase 2: t0..2t0 - loss is detected, atom 4 starts refill, and
     # stationary single-qubit rotations run on atom 0 and atom 3.
     ensemble.append_segments_batch([
-        (0, make_hold((1, 2), t0, t0, channel="rz")),
-        (3, make_hold((2, 2), t0, t0, channel="rx")),
+        (0, make_hold((0, 2), t0, t0, channel="rz")),
+        (3, make_hold((2, 1), t0, t0, channel="rx")),
         (4, make_smooth_segment(
             (5, 3), (3, 3), t0, duration=t0, channel="row",
         )),
@@ -243,22 +248,31 @@ def main() -> None:
         trajectory_lw=1.0,
         trajectory_alpha=0.42,
         trajectory_darken=0.75,
-        bottom_plane_alpha=0.22,
-        bottom_trap_lw=5.0,
-        bottom_trap_alpha=0.34,
-        bottom_trap_width_frac=0.26,
-        bottom_trap_arrow_length_frac=0.42,
-        bottom_trap_arrow_lw=1.4,
-        bottom_trap_arrow_alpha=0.95,
         trap_event_guide_color="#7d8795",
         trap_event_guide_lw=1.0,
         trap_event_guide_alpha=0.32,
         trap_event_guide_dashes=(3.0, 3.0),
-        # bottom plate uses the lattice_line_colors above (row/col)
-        bottom_grid_lw=1.0,
-        bottom_grid_alpha=0.55,
-        bottom_traj_lw=1.1,
-        bottom_traj_alpha=0.18,
+    )
+
+    # Projection plate uses the StackTimeStyle.lattice_line_colors above
+    # (row/col) for its grid. All projections are off for the main stack
+    # render — toggle on per call via a different ProjectPlaneStyle.
+    project_plane = ProjectPlaneStyle(
+        show_plane=True,
+        show_grid=True,
+        show_traps=True,
+        show_trajectory=True,
+        plane_alpha=0.22,
+        trap_lw=5.0,
+        trap_alpha=0.34,
+        trap_width_frac=0.26,
+        trap_arrow_length_frac=0.42,
+        trap_arrow_lw=1.4,
+        trap_arrow_alpha=0.95,
+        grid_lw=1.0,
+        grid_alpha=0.55,
+        traj_lw=1.1,
+        traj_alpha=0.18,
     )
 
     save_stack_time(
@@ -266,6 +280,7 @@ def main() -> None:
         t_values,
         OUTPUT_PATH,
         style=style,
+        project_plane=project_plane,
         atom_colors={
             0: "#1f3a93",
             1: "#1f3a93",
@@ -274,16 +289,14 @@ def main() -> None:
             4: "#1f3a93",
         },
         show_traps=True,
+        show_idle_traps=True,
         show_layer_plane=True,
         show_motion_arrows=True,
         show_motion_targets=True,
         show_trajectory=True,
-        show_bottom_plane=False,
-        show_bottom_grid=False,
-        show_bottom_traps=False,
-        show_bottom_trajectory=False,
         show_trap_event_guides=False,
         transparent=False,
+        show_project_plane=False,
     )
     print(f"wrote {OUTPUT_PATH}")
 

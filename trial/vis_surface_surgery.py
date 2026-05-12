@@ -45,7 +45,11 @@ from src.movement import PHYS_A_MAX, grid_accel_from_phys
 from src.segments import make_smooth_segment, min_jerk_duration
 
 import src.visualization_stack_time as vst
-from src.visualization_stack_time import StackTimeStyle, save_stack_time
+from src.visualization_stack_time import (
+    ProjectPlaneStyle,
+    StackTimeStyle,
+    save_stack_time,
+)
 
 # Every atom is part of the array from t=0 — there is no off-grid
 # reservoir loading in this demo. Suppress the "fresh-loaded" recolor
@@ -196,17 +200,24 @@ def main() -> None:
         trajectory_lw=1.0,
         trajectory_alpha=0.42,
         trajectory_darken=0.75,
-        bottom_plane_alpha=0.22,
-        bottom_trap_lw=5.0,
-        bottom_trap_alpha=0.20,
         trap_event_guide_color="#7d8795",
         trap_event_guide_lw=1.0,
         trap_event_guide_alpha=0.32,
         trap_event_guide_dashes=(3.0, 3.0),
-        bottom_grid_lw=1.0,
-        bottom_grid_alpha=0.55,
-        bottom_traj_lw=2.0,
-        bottom_traj_alpha=0.85,
+    )
+
+    project_plane = ProjectPlaneStyle(
+        show_plane=True,
+        show_grid=True,
+        show_traps=True,
+        show_trajectory=True,
+        plane_alpha=0.22,
+        trap_lw=5.0,
+        trap_alpha=0.20,
+        grid_lw=1.0,
+        grid_alpha=0.55,
+        traj_lw=2.0,
+        traj_alpha=0.85,
     )
 
     save_stack_time(
@@ -214,15 +225,12 @@ def main() -> None:
         t_values,
         OUTPUT_PATH,
         style=style,
+        project_plane=project_plane,
         atom_colors=atom_colors,
         show_traps=True,
         show_layer_plane=True,
         show_motion_arrows=True,
         show_trajectory=True,
-        show_bottom_plane=True,
-        show_bottom_grid=True,
-        show_bottom_traps=True,
-        show_bottom_trajectory=True,
         show_trap_event_guides=True,
         transparent=False,
     )
