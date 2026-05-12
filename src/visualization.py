@@ -149,6 +149,7 @@ def draw_traps(
     t: float,
     *,
     addressed_style: AddressedStyle = "edge",
+    trap_scale: float = 1.0,
 ) -> None:
     """Mark active traps for AOD and RIPA hardware.
 
@@ -192,21 +193,21 @@ def draw_traps(
 
     if addressed_style in ("blob", "both"):
         for x, y in addressed_xy:
-            _draw_gaussian_blob(ax, float(x), float(y))
+            _draw_gaussian_blob(ax, float(x), float(y), trap_scale=trap_scale)
         for x, y in empty_aod_xy:
-            _draw_gaussian_blob(ax, float(x), float(y))
+            _draw_gaussian_blob(ax, float(x), float(y), trap_scale=trap_scale)
     if addressed_style in ("edge", "both"):
         if len(addressed_xy):
             ax.scatter(
                 addressed_xy[:, 0], addressed_xy[:, 1],
-                s=ATOM_SIZE * 2.0, marker="o",
+                s=ATOM_SIZE * 2.0 * trap_scale**2, marker="o",
                 facecolors="none", edgecolors="#d62728",
                 linewidths=1.4, alpha=0.85, zorder=Z_TRAP_OUTLINE,
             )
         if len(empty_aod_xy):
             ax.scatter(
                 empty_aod_xy[:, 0], empty_aod_xy[:, 1],
-                s=GRIDPOINT_SIZE * 5.0, marker="s",
+                s=GRIDPOINT_SIZE * 5.0 * trap_scale**2, marker="s",
                 facecolors="none", edgecolors="#d62728",
                 linewidths=1.1, alpha=0.70, zorder=Z_TRAP_OUTLINE,
             )
@@ -283,6 +284,7 @@ def draw_motion_blur(
     *,
     samples: int = 12,
     colors: list[Any] | None = None,
+    atom_scale: float = 1.0,
 ) -> None:
     """Draw a fading speed-scaled trail behind every currently-moving atom."""
     if samples <= 1:
@@ -302,7 +304,11 @@ def draw_motion_blur(
             zorder=Z_MOTION_TRAIL,
         )
         fade = np.linspace(0.08, 0.32, len(xy))
-        sizes = np.linspace(ATOM_SIZE * 0.15, ATOM_SIZE * 0.55, len(xy))
+        sizes = np.linspace(
+            ATOM_SIZE * 0.15 * atom_scale**2,
+            ATOM_SIZE * 0.55 * atom_scale**2,
+            len(xy),
+        )
         for (x, y), alpha, size in zip(xy, fade, sizes):
             ax.scatter(
                 [x], [y], s=size, c=[color], alpha=float(alpha),
@@ -317,13 +323,14 @@ def draw_atoms(
     *,
     colors: list[Any] | None = None,
     show_atom_ids: bool = False,
+    atom_scale: float = 1.0,
 ) -> None:
     """Draw atoms at their positions at time `t`. Trap markers live in `draw_traps`."""
     colors = colors or _default_colors(ensemble)
     grid = ensemble.grid
     positions_xy = grid.ij_to_xy(ensemble.positions_at(t))
     ax.scatter(
-        positions_xy[:, 0], positions_xy[:, 1], s=ATOM_SIZE,
+        positions_xy[:, 0], positions_xy[:, 1], s=ATOM_SIZE * atom_scale**2,
         c=colors, edgecolors="#ffffff", linewidths=0.5, zorder=Z_ATOM,
     )
 
@@ -442,6 +449,8 @@ def draw_atom_panel(
     show_color_code: bool = False,
     color_code_swap: bool = False,
     title: str | None = None,
+    atom_scale: float = 1.0,
+    trap_scale: float = 1.0,
 ) -> None:
     """Compose one atom-plane panel by calling the visual primitives in z-order."""
     style = _QUALITY[quality]
@@ -475,13 +484,18 @@ def draw_atom_panel(
     )
     if style.show_motion_blur and not finished:
         draw_motion_blur(
-            ax, ensemble, t, samples=style.trail_samples, colors=colors
+            ax, ensemble, t, samples=style.trail_samples, colors=colors,
+            atom_scale=atom_scale,
         )
     draw_atoms(
         ax, ensemble, t, colors=colors, show_atom_ids=show_atom_ids,
+        atom_scale=atom_scale,
     )
     if sequence is not None and not finished:
-        draw_traps(ax, sequence, t, addressed_style=addressed_style)
+        draw_traps(
+            ax, sequence, t, addressed_style=addressed_style,
+            trap_scale=trap_scale,
+        )
     draw_grid_frame(ax, ensemble.grid)
     ax.set_title(title or f"atom motion  -  t = {_format_time_us(t)}")
 
@@ -503,6 +517,8 @@ def draw_frame(
     show_color_code: bool = False,
     color_code_swap: bool = False,
     title: str | None = None,
+    atom_scale: float = 1.0,
+    trap_scale: float = 1.0,
 ) -> tuple[Any, list[Any]]:
     """Build a fresh figure for `view` and draw the primitives on it; return (fig, axes)."""
     style = _QUALITY[quality]
@@ -514,7 +530,7 @@ def draw_frame(
             planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing,
             show_color_code=show_color_code, color_code_swap=color_code_swap,
-            title=title,
+            title=title, atom_scale=atom_scale, trap_scale=trap_scale,
         )
         return fig, [ax]
 
@@ -540,6 +556,7 @@ def draw_frame(
                 show_atom_ids=show_atom_ids, show_routing=show_routing,
                 show_color_code=show_color_code, color_code_swap=color_code_swap,
                 title=f"{label}  -  t = {_format_time_us(panel_t)}",
+                atom_scale=atom_scale, trap_scale=trap_scale,
             )
         if title:
             fig.suptitle(title)
@@ -564,7 +581,7 @@ def draw_frame(
             planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing,
             show_color_code=show_color_code, color_code_swap=color_code_swap,
-            title=None,
+            title=None, atom_scale=atom_scale, trap_scale=trap_scale,
         )
         draw_current_tones(row_now, ensemble, t, "row", colors=colors)
         draw_current_tones(col_now, ensemble, t, "col", colors=colors)
@@ -617,6 +634,8 @@ def render_animation(
     title: str | None = None,
     show_progress: bool = True,
     fmt: RenderFormat | None = None,
+    atom_scale: float = 1.0,
+    trap_scale: float = 1.0,
 ) -> Path:
     """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into an animation.
 
@@ -711,6 +730,7 @@ def render_animation(
         atom_colors=atom_colors,
         planned_trajectory=planned_trajectory,
         show_atom_ids=show_atom_ids, title=title,
+        atom_scale=atom_scale, trap_scale=trap_scale,
     )
 
     items: list[tuple[int, float, bool, bool, bool]] = [
@@ -1037,12 +1057,13 @@ def _next_tone_trajectory_by_atom(
 # --- assorted small helpers ------------------------------------------------
 
 
-def _draw_gaussian_blob(ax: Any, x: float, y: float) -> None:
+def _draw_gaussian_blob(ax: Any, x: float, y: float, *, trap_scale: float = 1.0) -> None:
     """Draw a soft red Gaussian halo at (x, y) using BLOB_SIGMA, under the atom layer."""
-    r = 3.0 * BLOB_SIGMA
+    sigma = BLOB_SIGMA * trap_scale
+    r = 3.0 * sigma
     vals = np.linspace(-r, r, 21)
     xx, yy = np.meshgrid(vals, vals)
-    zz = np.exp(-(xx**2 + yy**2) / (2.0 * BLOB_SIGMA**2))
+    zz = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
     rgba = np.empty((*zz.shape, 4), dtype=float)
     rgba[..., 0] = 0.839  # #d62728 — match trap-outline red
     rgba[..., 1] = 0.153

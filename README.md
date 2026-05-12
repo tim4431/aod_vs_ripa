@@ -75,20 +75,23 @@ With RIPA-native movements, we can implement the patch rotation in much shorter 
 
 ## How does a RIPA transportation work
 
+![eom hardmard rotation demo](demo/hardmard_patch_rotation_tones.gif)
+
 **What is so different about a RIPA ?**
 - It can move atoms independently in an arbitrary pattern (continuously along the cartesian grid).
 - It can be scheduled asynchronously.
 
 For detailed comparison, see [aod_vs_ripa.md](doc/aod_vs_ripa.md)
 
+<details>
+<summary>Click to see details</summary>
 
 - Continuous frequency sweeps move spots smoothly along either a row or a column.
 - Using frequency- or polarization- multiplexing to replicate the primary channel (row channel, continuously moving along x) and rotate it by 90 deg, so that the second channel (col channel) continuously moves along y.
 - The EOM RF drive switches each channel on/off independently, and they can be simultaneously on, they can have independent timing for multiple frequency tones (so does multiple tweezer traps).
 - To move an atom A → B: pick up atom from A, transport continuously along row/column. **At the intersection of row/column (i.e., at integer grid point (i,j))**, hand-off from one channel to the other. After several row(column)-continuous transport, the atom reaches B.
 
-![random routing tones demo](demo/random_routing_tones_demo.gif)
-
+</details>
 
 ## How to design a good RIPA scheduler
 RIPA scheduling is a very hard problem, mostly in its vast parameter space and its asynchronous nature. This repo implements some heuristic algorithms, as well as a searching algorithm, see [scheduler/readme.md](src/scheduler/readme.md).
