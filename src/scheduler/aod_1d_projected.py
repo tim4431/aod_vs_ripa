@@ -167,15 +167,56 @@ class AOD1DProjectedScheduler(SyncScheduler):
 
         moves, final_1d = self._plan_1d(workspace, src_1d, dst_1d, order)
 
+        current_atoms = list(src_1d)
         for frm, to in moves:
-            self._append_aod(projection, fixed, lift_to, frm, frm)
-            self._append_aod(projection, lift_to, lift_to, frm, to)
-            self._append_aod(projection, lift_to, fixed, to, to)
+            if self._slide_collides(frm, to, current_atoms):
+                self._append_aod(projection, fixed, lift_to, frm, frm)
+                self._append_aod(projection, lift_to, lift_to, frm, to)
+                self._append_aod(projection, lift_to, fixed, to, to)
+            else:
+                self._append_aod(projection, fixed, fixed, frm, to)
+            moving_keys = {round(f, 9) for f in frm}
+            current_atoms = [
+                a for a in current_atoms if round(a, 9) not in moving_keys
+            ] + list(to)
 
         final_list = list(final_1d)
         sorted_dst = sorted(dst_1d)
         if final_list != sorted_dst:
             self._append_aod(projection, fixed, fixed, final_list, sorted_dst)
+
+    @staticmethod
+    def _slide_collides(
+        frm: Sequence[float],
+        to: Sequence[float],
+        current_atoms: Sequence[float],
+    ) -> bool:
+        """Whether sliding `frm` -> `to` on the storage line hits another atom.
+
+        AOD moves preserve ordering, so moving atoms can never collide with
+        each other. The only obstacles are atoms on the storage line that
+        are *stationary* during this step: atoms not in `frm` plus any
+        no-op moving atom (`frm[i] == to[i]`). A collision happens iff one
+        of those sits strictly inside some moving atom's travel interval.
+        """
+        moving_motion: dict[float, float] = {}
+        for f, t in zip(frm, to):
+            moving_motion[round(f, 9)] = t
+        stationary: list[float] = []
+        for atom in current_atoms:
+            key = round(atom, 9)
+            if key not in moving_motion:
+                stationary.append(atom)
+            elif abs(moving_motion[key] - atom) <= 1e-9:
+                stationary.append(atom)
+        for f, t in zip(frm, to):
+            if abs(f - t) <= 1e-9:
+                continue
+            lo, hi = (f, t) if f < t else (t, f)
+            for s in stationary:
+                if lo + 1e-9 < s < hi - 1e-9:
+                    return True
+        return False
 
     # ---- subclass hooks -----------------------------------------------------
 
