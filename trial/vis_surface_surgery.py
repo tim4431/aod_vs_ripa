@@ -230,9 +230,10 @@ def main() -> None:
         show_traps=True,
         show_layer_plane=True,
         show_motion_arrows=True,
-        show_trajectory=True,
+        show_trajectory=False,
         show_trap_event_guides=True,
         transparent=False,
+        show_project_plane=False,
     )
     print(f"wrote {OUTPUT_PATH}")
 

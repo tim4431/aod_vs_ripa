@@ -75,7 +75,7 @@ class StackTimeStyle:
 
     # Atom discs
     atom_edge_color: Any = "#ffffff"
-    atom_edge_lw: float = 0.6
+    atom_edge_lw: float = 1.4
     atom_radius_frac: float = 0.30
     atom_disc_segments: int = 48
     atom_plane_z_offset: float = 0.02
@@ -155,6 +155,13 @@ class StackTimeStyle:
     # Start angle for two-tone trap tubes. Color 0 covers
     # [theta, theta + pi], color 1 covers [theta + pi, theta + 2pi].
     trap_two_tone_theta: float = 0
+    # Half-width (in radians) of the white smoothstep transition band
+    # between the two tones, centered on the boundary. 0 means an abrupt
+    # boundary. Per-channel overrides via `trap_two_tone_transition_widths`.
+    trap_two_tone_transition_width: float = np.pi / 9.0
+    trap_two_tone_transition_widths: Mapping[Any, float] = field(
+        default_factory=dict
+    )
     # Smoothstep fade ramp at each end of a normal trap tube, expressed
     # as a fraction of the segment duration. The segment is sampled in
     # time but rendered along z, so this is effectively a *depth* fade
@@ -163,8 +170,8 @@ class StackTimeStyle:
     # at both ends; large values would lag the atom by the ramp width.
     trap_ramp_frac: float = 0.10
     trap_ramp_alpha_floor: float = 0.0
-    trap_samples_per_segment: int = 36
-    tube_facets: int = 128
+    trap_samples_per_segment: int = 96
+    tube_facets: int = 256
 
     # Idle trap tube: drawn for time intervals where an atom has no
     # active segment (no row/col move, no aod, no stationary gate).
@@ -195,6 +202,16 @@ class StackTimeStyle:
     trap_event_guide_lw: float = 1.0
     trap_event_guide_alpha: float = 0.32
     trap_event_guide_dashes: tuple[float, float] = (3.0, 3.0)
+
+    # Per-layer connection polylines joining caller-supplied vertex
+    # lists at each layer's z (see `layer_connections=` on
+    # `draw_stack_time`). Drawn under the atom discs.
+    # `layer_connection_dashes=None` -> solid line.
+    layer_connection_color: Any = "#9a9a9a"
+    layer_connection_lw: float = 1.0
+    layer_connection_alpha: float = 0.85
+    layer_connection_dashes: tuple[float, float] | None = None
+    layer_connection_z_offset: float = -0.02
 
     # Title
     title_pad: float = 18
@@ -289,11 +306,14 @@ def _angular_two_tone_rgbs(
     rgbs: np.ndarray,
     theta: np.ndarray,
     theta0: float = 0.0,
+    half_width: float = np.pi / 9.0,
 ) -> np.ndarray:
     """Color [theta0, theta0+pi] with color 0 and the opposite half with color 1.
 
-    The transition band centered at theta0+pi ramps color0 -> white -> color1
-    using the same smoothstep profile as the trap alpha ramps.
+    `half_width` is the half-angular extent (radians) of the transition
+    band centered at theta0+pi, ramping color0 -> white -> color1 with a
+    smoothstep profile. Pass 0 for an abrupt color1<->color0 boundary
+    with no white blend.
     """
     stops = np.asarray(rgbs, dtype=float).reshape(-1, 3)
     phase = np.mod(np.asarray(theta, dtype=float) - float(theta0), 2.0 * np.pi)
@@ -304,10 +324,13 @@ def _angular_two_tone_rgbs(
         )
         return stops[idx]
 
-    white = np.ones(3, dtype=float)
-    half_width = np.pi / 9.0
     rgb = np.empty(phase.shape + (3,), dtype=float)
+    if half_width <= 0.0:
+        rgb[phase < np.pi] = stops[0]
+        rgb[phase >= np.pi] = stops[1]
+        return rgb
 
+    white = np.ones(3, dtype=float)
     orange_side = phase <= np.pi - half_width
     yellow_side = phase >= np.pi + half_width
     lower_ramp = (phase > np.pi - half_width) & (phase <= np.pi)
@@ -607,6 +630,7 @@ def draw_stack_time(
     show_project_plane: bool = True,
     style: StackTimeStyle | None = None,
     project_plane: ProjectPlaneStyle | None = None,
+    layer_connections: Mapping[int, Sequence[Sequence[tuple[int, int]]]] | None = None,
     title: str | None = None,
 ) -> None:
     """Draw a time-stacked 3D figure of `motion` on a 3D `ax`.
@@ -620,6 +644,14 @@ def draw_stack_time(
     trajectory polylines) so only the projection plate renders;
     set `show_project_plane=False` to suppress the projection plate
     entirely (overrides the per-element flags on `project_plane`).
+
+    `layer_connections` is an optional `{layer_idx: [polyline, ...]}`
+    map. Each polyline is a sequence of (i, j) grid sites; consecutive
+    sites are joined by a dashed gray segment drawn on that layer's
+    plane (styled via `StackTimeStyle.layer_connection_*`). Use it to
+    show static structure on a layer (patch outlines, ancilla chains,
+    etc.) — the caller is responsible for picking vertex lists that
+    line up with where the atoms actually sit on that layer.
     """
     s = style if style is not None else DEFAULT_STYLE
     pp = project_plane if project_plane is not None else DEFAULT_PROJECT_PLANE
@@ -1096,12 +1128,44 @@ def draw_stack_time(
         except AttributeError:
             pass
 
+    def _draw_layer_connections(z_layer: float, layer_alpha_: float, i: int) -> None:
+        if not layer_connections:
+            return
+        polylines = layer_connections.get(i)
+        if not polylines:
+            return
+        z_draw = float(z_layer) + float(s.layer_connection_z_offset)
+        color = s.layer_connection_color
+        for polyline in polylines:
+            ij = np.asarray(list(polyline), dtype=float)
+            if len(ij) < 2:
+                continue
+            xy = grid.ij_to_xy(ij)
+            zs_line = np.full(len(xy), z_draw, dtype=float)
+            # Low zorder + sort_zpos pinned below the layer's z keeps the
+            # line under the atom discs on this layer.
+            line, = ax.plot(
+                xy[:, 0], xy[:, 1], zs_line,
+                color=color,
+                lw=s.layer_connection_lw,
+                alpha=s.layer_connection_alpha * layer_alpha_,
+                solid_capstyle="round",
+                zorder=0.5,
+            )
+            if s.layer_connection_dashes is not None:
+                line.set_dashes(list(s.layer_connection_dashes))
+            try:
+                line.set_sort_zpos(z_draw)
+            except AttributeError:
+                pass
+
     def _draw_layer(i: int) -> None:
         t = t_arr[i]
         z = layer_zs[i]
         layer_alpha = layer_alphas[i]
 
         _draw_layer_plane(z, layer_alpha)
+        _draw_layer_connections(z, layer_alpha, i)
 
         ij_now = ensemble.positions_at(t)
         atom_xy = grid.ij_to_xy(ij_now)
@@ -1269,6 +1333,9 @@ def draw_stack_time(
             [to_rgb(c) for c in _colorway(channel_color)], s.tube_facets,
             sort_zpos=float(np.mean(zs)),
             theta0=s.trap_two_tone_theta,
+            two_tone_half_width=s.trap_two_tone_transition_widths.get(
+                seg.channel, s.trap_two_tone_transition_width,
+            ),
         )
 
     idle_trap_radius = (
@@ -1453,12 +1520,15 @@ def draw_stack_time(
 def _draw_trap_tube(
     ax, centers_xy, zs_along, wall_alpha, radius, rgb, facets, *,
     sort_zpos=None, theta0: float = 0.0,
+    two_tone_half_width: float = np.pi / 9.0,
 ):
     """Render one trap as a 3D tube whose wall alpha varies along z.
 
     A two-color channel renders as an angular split: theta in
-    [theta0, theta0 + pi] uses color 0, the opposite half uses color 1, and
-    the neighborhood of theta0 + pi ramps through white.
+    [theta0, theta0 + pi] uses color 0, the opposite half uses color 1,
+    and a smoothstep band of half-width `two_tone_half_width` centered
+    on theta0 + pi ramps through white. Pass `two_tone_half_width=0`
+    for an abrupt boundary with no transition.
     """
     n_along = len(centers_xy)
     if n_along < 2:
@@ -1482,7 +1552,7 @@ def _draw_trap_tube(
     else:
         face_theta = 0.5 * (angles[:-1] + angles[1:])
         facecolors[..., :3] = _angular_two_tone_rgbs(
-            rgbs, face_theta, theta0,
+            rgbs, face_theta, theta0, half_width=two_tone_half_width,
         )[None, :, :]
     facecolors[..., 3] = face_alpha[:, None]
     surf = ax.plot_surface(
@@ -1750,6 +1820,7 @@ def _draw_gaussian_blob_two_tone_2d(
     color_b: Any,
     *,
     theta0: float = 0.0,
+    half_width: float = np.pi / 9.0,
     sigma_frac: float = 0.42,
     alpha_max: float = 0.85,
     grid_size: int = 96,
@@ -1775,7 +1846,7 @@ def _draw_gaussian_blob_two_tone_2d(
     alpha[dist2 > r_box * r_box] = 0.0
     theta = np.arctan2(YY, XX)
     rgbs = np.asarray([to_rgba(color_a)[:3], to_rgba(color_b)[:3]], dtype=float)
-    rgb = _angular_two_tone_rgbs(rgbs, theta, theta0=theta0)
+    rgb = _angular_two_tone_rgbs(rgbs, theta, theta0=theta0, half_width=half_width)
     img = np.empty((n, n, 4), dtype=float)
     img[..., :3] = rgb
     img[..., 3] = alpha
@@ -1928,6 +1999,9 @@ def draw_ground_plane_2d(
                         ax, center_xy, gate_blob_radius,
                         colors_list[0], colors_list[1],
                         theta0=s.trap_two_tone_theta,
+                        half_width=s.trap_two_tone_transition_widths.get(
+                            seg.channel, s.trap_two_tone_transition_width,
+                        ),
                         sigma_frac=s.gate_blob_sigma_frac,
                         alpha_max=s.gate_blob_alpha_max,
                         grid_size=s.gate_blob_grid_size,

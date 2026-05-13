@@ -193,7 +193,7 @@ def main() -> None:
 
     style = StackTimeStyle(
         figsize=(7.6, 8.6),
-        dpi=240,
+        dpi=600,
         projection_type="ortho",
         # all layers similarly opaque so the top doesn't wash out
         layer_alpha_floor=0.9,
@@ -207,14 +207,14 @@ def main() -> None:
         layer_plane_extension_frac=0.55,
         # small solid in-plane arrows: current move direction at each layer,
         # color-keyed by RIPA row/col channel
-        motion_arrow_lw=1.6,
+        motion_arrow_lw=1.8,
         motion_arrow_alpha=1.0,
         motion_arrow_length_frac=1.0,
         motion_arrow_max_length_frac=0.58,
         motion_arrow_head_length_frac=0.20,
         motion_arrow_head_width_frac=0.24,
-        motion_arrow_start_offset_frac=0.20,
-        motion_arrow_z_offset=0.08,
+        motion_arrow_start_offset_frac=0.30,
+        motion_arrow_z_offset=0.04,
         motion_arrow_channel_colors={
             "row": "#ff2828", "col": "#29b0ff",
             "rz": "#f97316", "rx": "#facc15",
@@ -242,9 +242,12 @@ def main() -> None:
             "aod": "#888888", None: "#888888",
         },
         trap_two_tone_theta=3*np.pi/4-0.33,
+        # Rx uses orange+yellow; force an abrupt boundary between them
+        # (no white smoothstep band).
+        trap_two_tone_transition_widths={"rx": 0.0},
         trap_ramp_frac=0.30,
         trap_ramp_alpha_floor=0.12,
-        trap_samples_per_segment=56,
+        trap_samples_per_segment=256,
         trajectory_lw=1.0,
         trajectory_alpha=0.42,
         trajectory_darken=0.75,
@@ -275,12 +278,22 @@ def main() -> None:
         traj_alpha=0.18,
     )
 
+    # Per-layer dashed-gray connections — one closed quad through the
+    # four working atoms on each layer. Atoms (non-fresh) sit on the
+    # vertices.
+    layer_connections = {
+        0: [[(1, 2), (1, 3), (2, 3), (2, 2), (1, 2)]],
+        1: [[(0, 2), (1, 4), (3, 3), (2, 1), (0, 2)]],
+        2: [[(0, 2), (1, 4), (3, 3), (2, 1), (0, 2)]],
+    }
+
     save_stack_time(
         ensemble,
         t_values,
         OUTPUT_PATH,
         style=style,
         project_plane=project_plane,
+        layer_connections=layer_connections,
         atom_colors={
             0: "#1f3a93",
             1: "#1f3a93",
@@ -293,28 +306,28 @@ def main() -> None:
         show_layer_plane=True,
         show_motion_arrows=True,
         show_motion_targets=True,
-        show_trajectory=True,
+        show_trajectory=False,
         show_trap_event_guides=False,
         transparent=False,
         show_project_plane=False,
     )
     print(f"wrote {OUTPUT_PATH}")
 
-    per_timestep_atom_colors = {
-        0: "#1f3a93",
-        1: "#1f3a93",
-        2: "#1f3a93",
-        3: "#1f3a93",
-        4: "#1f3a93",
-    }
+    # per_timestep_atom_colors = {
+    #     0: "#1f3a93",
+    #     1: "#1f3a93",
+    #     2: "#1f3a93",
+    #     3: "#1f3a93",
+    #     4: "#1f3a93",
+    # }
 
-    save_per_timestep_frames(
-        ensemble,
-        t_values,
-        PER_TIMESTEP_DIR,
-        style=style,
-        atom_colors=per_timestep_atom_colors,
-    )
+    # save_per_timestep_frames(
+    #     ensemble,
+    #     t_values,
+    #     PER_TIMESTEP_DIR,
+    #     style=style,
+    #     atom_colors=per_timestep_atom_colors,
+    # )
 
     # save_per_timestep_frames_3d(
     #     ensemble,
