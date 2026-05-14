@@ -33,8 +33,8 @@ from src.visualization import render_animation
 N = 7
 PATCH_SIDE = 5
 STORAGE_PERIOD = 1
-GRID_SPACING_UM = 5.0
-COLLISION_RADIUS_UM = 1.0
+GRID_SPACING_UM = 15.0
+COLLISION_RADIUS_UM = 3.0
 
 ATOM_SCALE = 1.4
 TRAP_SCALE = 0.4
