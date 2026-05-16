@@ -633,11 +633,12 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=5e3,
+        time_dilation=1e4,
         hold_seconds=1.5,
         atom_colors=patch_rotation_colors(src),
         show_routing_on_start=True,
         show_color_code=True,
+        panel_speedup={"AOD H rotation": 8.0},
         title=f"Hadamard patch rotation ({PATCH_SIDE}x{PATCH_SIDE})",
     )
     print(f"wrote {out_path}")

@@ -500,6 +500,26 @@ def draw_atom_panel(
     ax.set_title(title or f"atom motion  -  t = {_format_time_us(t)}")
 
 
+def _draw_speedup_indicator(ax: Any, speed_str: str, frame_index: int) -> None:
+    """Draw a "Nx ›››" badge in the panel's upper-left with a chasing-chevron
+    pulse so it visually reads as a fast-forward playback overlay."""
+    color = "#d62728"
+    ax.text(
+        0.02, 0.97, f"{speed_str}x",
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=14, fontweight="bold", color=color, zorder=10,
+    )
+    phase = int(frame_index) % 3
+    for i in range(3):
+        alpha = 1.0 if i == phase else 0.25
+        ax.text(
+            0.10 + i * 0.035, 0.97, "›",
+            transform=ax.transAxes, ha="left", va="top",
+            fontsize=16, fontweight="bold", color=color, alpha=alpha,
+            zorder=10,
+        )
+
+
 # --- frame composer + IO ---------------------------------------------------
 
 
@@ -519,6 +539,9 @@ def draw_frame(
     title: str | None = None,
     atom_scale: float = 1.0,
     trap_scale: float = 1.0,
+    panel_speedup: Mapping[str, float] | None = None,
+    frame_index: int = 0,
+    is_motion_frame: bool = True,
 ) -> tuple[Any, list[Any]]:
     """Build a fresh figure for `view` and draw the primitives on it; return (fig, axes)."""
     style = _QUALITY[quality]
@@ -549,15 +572,36 @@ def draw_frame(
                 panel_motion if isinstance(panel_motion, AtomEnsemble)
                 else panel_motion.ensemble
             )
-            panel_t = min(float(t), panel_ensemble.total_duration())
+            factor = (
+                float(panel_speedup.get(label, 1.0))
+                if panel_speedup is not None else 1.0
+            )
+            panel_total = panel_ensemble.total_duration()
+            panel_t = min(float(t) * factor, panel_total)
+            speed_tag = ""
+            speed_str = ""
+            if factor != 1.0:
+                speed_str = f"{int(factor)}" if factor.is_integer() else f"{factor:g}"
+                speed_tag = rf"  ($\mathbf{{{speed_str}x}}$ speed)"
             draw_atom_panel(
                 ax, panel_motion, panel_t, quality=quality, atom_colors=atom_colors,
                 planned_trajectory=planned_trajectory,
                 show_atom_ids=show_atom_ids, show_routing=show_routing,
                 show_color_code=show_color_code, color_code_swap=color_code_swap,
-                title=f"{label}  -  t = {_format_time_us(panel_t)}",
+                title=f"{label}{speed_tag}",
                 atom_scale=atom_scale, trap_scale=trap_scale,
             )
+            # Right-anchored so digits of varying width don't shift its position.
+            ax.text(
+                0.98, 0.97, f"t = {_format_time_us(panel_t)}",
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=10, zorder=10,
+            )
+            if (
+                is_motion_frame and factor != 1.0
+                and panel_t < panel_total - 1e-12
+            ):
+                _draw_speedup_indicator(ax, speed_str, frame_index)
         if title:
             fig.suptitle(title)
         return fig, axes_list
@@ -636,6 +680,7 @@ def render_animation(
     fmt: RenderFormat | None = None,
     atom_scale: float = 1.0,
     trap_scale: float = 1.0,
+    panel_speedup: Mapping[str, float] | None = None,
 ) -> Path:
     """Render a PNG sequence by calling `draw_frame` per timestep, then stitch into an animation.
 
@@ -678,7 +723,8 @@ def render_animation(
         total = max(
             (
                 (m if isinstance(m, AtomEnsemble) else m.ensemble).total_duration()
-                for _, m in items_norm
+                / (float(panel_speedup.get(label, 1.0)) if panel_speedup else 1.0)
+                for label, m in items_norm
             ),
             default=0.0,
         )
@@ -731,6 +777,7 @@ def render_animation(
         planned_trajectory=planned_trajectory,
         show_atom_ids=show_atom_ids, title=title,
         atom_scale=atom_scale, trap_scale=trap_scale,
+        panel_speedup=dict(panel_speedup) if panel_speedup is not None else None,
     )
 
     items: list[tuple[int, float, bool, bool, bool]] = [
@@ -1144,10 +1191,14 @@ def _frame_worker_init(
 
 def _frame_worker_render(item: tuple[int, float, bool, bool, bool]) -> str:
     k, t, show_routing, show_color_code, color_code_swap = item
+    # Plan invariant in `render_animation`: motion frames carry
+    # color_code_swap=True; the start-hold frame carries False. End-of-run
+    # idleness is implicit via panel_t saturating at panel_total.
     fig, _ = draw_frame(
         _FRAME_WORKER["motion"], float(t),
         show_routing=show_routing, show_color_code=show_color_code,
-        color_code_swap=color_code_swap,
+        color_code_swap=color_code_swap, frame_index=int(k),
+        is_motion_frame=bool(color_code_swap),
         **_FRAME_WORKER["draw_kwargs"],
     )
     path = _FRAME_WORKER["tmp_path"] / f"frame_{k:05d}.png"

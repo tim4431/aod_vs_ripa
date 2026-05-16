@@ -44,7 +44,7 @@ PREFIX = "defect_free_assembly_benchmark"
 
 # Dict order = panel order. Keys also become panel labels.
 SCHEDULERS = {
-    "RIPA pebble adv": UnlabeledRIPAPebbleAdvScheduler,
+    "RIPA Naive": UnlabeledRIPAPebbleAdvScheduler,
     "AOD Tetris": AODTetrisScheduler,
     "AOD sqrt-time": SqrtTimeAODScheduler,
 }
@@ -104,10 +104,13 @@ def main() -> None:
         out_path,
         view="benchmark",
         quality=quality,
-        time_dilation=6e3,
+        time_dilation=8e3,
         hold_seconds=1.5,
         atom_colors={idx: "gray" for idx in range(N * N)},
         title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
+        panel_speedup={"AOD Tetris": 4.0, "AOD sqrt-time": 4.0},
+        atom_scale=1.0,
+        trap_scale=0.65,
     )
     print(f"wrote {out_path}")
 
