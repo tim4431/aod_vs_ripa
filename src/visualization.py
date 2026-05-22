@@ -324,6 +324,8 @@ def draw_atoms(
     colors: list[Any] | None = None,
     show_atom_ids: bool = False,
     atom_scale: float = 1.0,
+    edge_color: Any = "#ffffff",
+    edge_linewidth: float = 0.5,
 ) -> None:
     """Draw atoms at their positions at time `t`. Trap markers live in `draw_traps`."""
     colors = colors or _default_colors(ensemble)
@@ -331,7 +333,8 @@ def draw_atoms(
     positions_xy = grid.ij_to_xy(ensemble.positions_at(t))
     ax.scatter(
         positions_xy[:, 0], positions_xy[:, 1], s=ATOM_SIZE * atom_scale**2,
-        c=colors, edgecolors="#ffffff", linewidths=0.5, zorder=Z_ATOM,
+        c=colors, edgecolors=edge_color, linewidths=edge_linewidth,
+        zorder=Z_ATOM,
     )
 
     if show_atom_ids:
@@ -1104,20 +1107,32 @@ def _next_tone_trajectory_by_atom(
 # --- assorted small helpers ------------------------------------------------
 
 
-def _draw_gaussian_blob(ax: Any, x: float, y: float, *, trap_scale: float = 1.0) -> None:
-    """Draw a soft red Gaussian halo at (x, y) using BLOB_SIGMA, under the atom layer."""
+def _draw_gaussian_blob(
+    ax: Any,
+    x: float,
+    y: float,
+    *,
+    trap_scale: float = 1.0,
+    rgba: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Draw a soft Gaussian halo at (x, y) using BLOB_SIGMA, under the atom
+    layer. `rgba` overrides the default red trap-outline tint; its alpha
+    is multiplied by the Gaussian so callers pass the peak alpha they want
+    at the center."""
     sigma = BLOB_SIGMA * trap_scale
     r = 3.0 * sigma
     vals = np.linspace(-r, r, 21)
     xx, yy = np.meshgrid(vals, vals)
     zz = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
-    rgba = np.empty((*zz.shape, 4), dtype=float)
-    rgba[..., 0] = 0.839  # #d62728 — match trap-outline red
-    rgba[..., 1] = 0.153
-    rgba[..., 2] = 0.157
-    rgba[..., 3] = 0.55 * zz
+    if rgba is None:
+        rgba = (0.839, 0.153, 0.157, 0.55)  # #d62728 — match trap-outline red
+    rgba_arr = np.empty((*zz.shape, 4), dtype=float)
+    rgba_arr[..., 0] = rgba[0]
+    rgba_arr[..., 1] = rgba[1]
+    rgba_arr[..., 2] = rgba[2]
+    rgba_arr[..., 3] = rgba[3] * zz
     ax.imshow(
-        rgba,
+        rgba_arr,
         extent=(x - r, x + r, y - r, y + r),
         origin="lower",
         interpolation="bilinear",
