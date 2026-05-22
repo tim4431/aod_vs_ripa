@@ -60,14 +60,15 @@ def build_sequence() -> MovingSequence:
     initial = AtomConfig(positions=np.asarray(sources, dtype=float))
     sequence = MovingSequence(grid=grid, initial=initial)
 
-    # Phase 1: all three start at t = 0 on different channels.
-    # Atom 2's segment is appended before atom 1's so that when atom 1's
-    # row-right is validated, atom 2 is already moving away from (2, 1) --
-    # otherwise the validator sees atom 2 statically parked at (2, 1) and
-    # rejects atom 1's segment as ending on top of it.
-    sequence.append(RIPAStep(0.0, atom_id=0, target=(0.0, 1.0), channel="col"))
-    sequence.append(RIPAStep(0.0, atom_id=2, target=(2.0, 3.0), channel="col"))
-    sequence.append(RIPAStep(0.0, atom_id=1, target=(2.0, 1.0), channel="row"))
+    # Phase 1: all three atoms start at t = 0 on different channels.
+    # `append_sync_batch` validates the three segments together, so the
+    # order of steps inside the batch doesn't matter even though atom 1's
+    # row-right ends at atom 2's initial site (2, 1).
+    sequence.append_sync_batch([
+        RIPAStep(0.0, atom_id=0, target=(0.0, 1.0), channel="col"),
+        RIPAStep(0.0, atom_id=1, target=(2.0, 1.0), channel="row"),
+        RIPAStep(0.0, atom_id=2, target=(2.0, 3.0), channel="col"),
+    ])
 
     # Phase 2 per atom on its own timeline. Atom 2 finished its single phase
     # already (no phase 2). Atoms 0 and 1 each get a stationary HANDOFF_HOLD
@@ -75,14 +76,14 @@ def build_sequence() -> MovingSequence:
     atom0_p1_end = sequence.ensemble.atomtraj_by_id(0).final_time
     atom1_p1_end = sequence.ensemble.atomtraj_by_id(1).final_time
 
-    # sequence.append(RIPAStep(
-    #     atom0_p1_end + HANDOFF_HOLD, atom_id=0,
-    #     target=(2.0, 1.0), channel="row",
-    # ))
-    # sequence.append(RIPAStep(
-    #     atom1_p1_end + HANDOFF_HOLD, atom_id=1,
-    #     target=(2.0, 2.0), channel="col",
-    # ))
+    sequence.append_sync_batch([
+        RIPAStep(
+        atom0_p1_end + HANDOFF_HOLD, atom_id=0,
+        target=(2.0, 1.0), channel="row",
+    ), RIPAStep(
+        atom1_p1_end + HANDOFF_HOLD, atom_id=1,
+        target=(2.0, 2.0), channel="col",
+    )])
     return sequence
 
 

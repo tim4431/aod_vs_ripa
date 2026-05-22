@@ -92,17 +92,59 @@ class MovingSequence:
         return new
 
     def append_sync_batch(self, steps: list[Step]) -> dict[int, list[Segment]]:
-        """Append a batch of steps that share `next_start_time()`.
+        """Append a batch of steps that share `next_start_time()`, with
+        order-independent validation.
 
-        After this call, `next_start_time()` reflects the latest end_time
-        across the batch ("wait for everyone" semantics). Any collision
-        inside the batch raises `CollisionError` from the offending step.
+        The naive "apply each step in order" loop has a subtle ordering
+        bug: when step A is applied first, the collision validator sees
+        every *other* batch member as a static atom at its initial site
+        (because their motion hasn't been committed yet), and rejects A
+        if A's endpoint sits on top of that static other. The fix here:
+        if a step trips `CollisionError` against another not-yet-applied
+        batch member, defer it and retry after the rest commit -- by
+        then the conflicting member is moving and the validator sees its
+        real trajectory. The batch is rolled back atomically if no step
+        in a retry round can make progress (a genuine mutual collision).
+        Non-collision errors (e.g. continuity) also trigger rollback.
         """
-        merged: dict[int, list[Segment]] = {}
-        for step in steps:
-            for aid, segs in self.append(step).items():
-                merged.setdefault(aid, []).extend(segs)
-        return merged
+        if not steps:
+            return {}
+
+        ensemble = self._ensemble
+        assert ensemble is not None
+        old_lengths = {
+            atom.atom_id: len(atom.segments) for atom in ensemble.atomtrajs
+        }
+
+        try:
+            pending: list[Step] = list(steps)
+            last_error: Exception | None = None
+            while pending:
+                still_pending: list[Step] = []
+                committed_this_round = 0
+                for step in pending:
+                    try:
+                        step.apply(ensemble)
+                        committed_this_round += 1
+                    except CollisionError as exc:
+                        last_error = exc
+                        still_pending.append(step)
+                if committed_this_round == 0:
+                    assert last_error is not None
+                    raise last_error
+                pending = still_pending
+        except Exception:
+            for atom in ensemble.atomtrajs:
+                del atom.segments[old_lengths[atom.atom_id]:]
+            raise
+
+        self.steps.extend(steps)
+        added: dict[int, list[Segment]] = {}
+        for atom in ensemble.atomtrajs:
+            new_segs = atom.segments[old_lengths[atom.atom_id]:]
+            if new_segs:
+                added[atom.atom_id] = list(new_segs)
+        return added
 
     # ---- re-validation at a different collision tolerance ------------------
 
