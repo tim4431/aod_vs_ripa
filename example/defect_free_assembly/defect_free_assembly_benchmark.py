@@ -6,8 +6,8 @@ place while the other keeps moving until both are done -- AtomEnsemble's
 `position_at(t)` clamps each atom to its final site past its sequence end.
 
 Usage:
-    python example/defect_free_assembly_benchmark.py            # quick check -> render/
-    python example/defect_free_assembly_benchmark.py --demo     # online quality -> demo/
+    python example/defect_free_assembly/defect_free_assembly_benchmark.py            # quick check -> render/
+    python example/defect_free_assembly/defect_free_assembly_benchmark.py --demo     # online quality -> demo/
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

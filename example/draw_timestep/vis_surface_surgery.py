@@ -21,11 +21,11 @@ Sequence on an 8x8 grid:
                         between patch A and patch B.
 
 The lockstep ring decomposition mirrors `LockstepRIPAHadamardPatchRotationScheduler`
-in `example/hardmard_patch_rotation.py`; the visualization style mirrors
-`trial/vis_example.py`.
+in `example/hadamard_rotation/hadamard_patch_rotation.py`; the visualization style mirrors
+`example/draw_timestep/vis_example.py`.
 
 Usage:
-    python trial/vis_surface_surgery.py
+    python example/draw_timestep/vis_surface_surgery.py
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -60,7 +60,7 @@ vst._is_fresh_at = lambda atom, t, eps=1e-9: False
 N = 8
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 2.0
-OUTPUT_PATH = ROOT / "trial" / "vis_surface_surgery.png"
+OUTPUT_PATH = ROOT / "example" / "draw_timestep" / "vis_surface_surgery.png"
 
 PATCH_A_ROWS = (1, 2, 3)
 PATCH_A_COLS = (1, 2, 3)

@@ -1,7 +1,7 @@
 """Average defect-free assembly performance over many initial arrangements.
 
 Usage:
-    python example/defect_free_assembly_performance.py
+    python example/defect_free_assembly/defect_free_assembly_performance.py
 """
 
 from __future__ import annotations

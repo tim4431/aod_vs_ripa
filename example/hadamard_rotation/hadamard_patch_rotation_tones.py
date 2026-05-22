@@ -7,8 +7,8 @@ sits on a 5x5 grid with storage period 1 (atom spacing == grid
 spacing), which keeps the tone axes compact and readable.
 
 Usage:
-    python example/hardmard_patch_rotation_tones.py            # quick check -> render/
-    python example/hardmard_patch_rotation_tones.py --demo     # quality GIF -> demo/
+    python example/hadamard_rotation/hadamard_patch_rotation_tones.py            # quick check -> render/
+    python example/hadamard_rotation/hadamard_patch_rotation_tones.py --demo     # quality GIF -> demo/
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from example.hardmard_patch_rotation import (
+from example.hadamard_rotation.hadamard_patch_rotation import (
     ManualRIPAHadamardPatchRotationScheduler,
     hadamard_rotation_targets,
     patch_rotation_colors,
@@ -39,7 +39,7 @@ COLLISION_RADIUS_UM = 3.0
 ATOM_SCALE = 1.4
 TRAP_SCALE = 0.4
 
-PREFIX = "hardmard_patch_rotation_tones"
+PREFIX = "hadamard_patch_rotation_tones"
 
 
 def main() -> None:

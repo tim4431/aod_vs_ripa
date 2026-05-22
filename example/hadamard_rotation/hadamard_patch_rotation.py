@@ -12,8 +12,8 @@ across all constant-`i+j` anti-diagonals; empty AOD intersections are allowed
 and simply do not move an atom.
 
 Usage:
-    python example/hardmard_patch_rotation.py            # quick GIF -> render/
-    python example/hardmard_patch_rotation.py --demo     # high quality -> demo/
+    python example/hadamard_rotation/hadamard_patch_rotation.py            # quick GIF -> render/
+    python example/hadamard_rotation/hadamard_patch_rotation.py --demo     # high quality -> demo/
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Literal
 
 import matplotlib as mpl
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -51,7 +51,7 @@ STORAGE_PERIOD = 3
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 3.0
 
-PREFIX = "hardmard_patch_rotation"
+PREFIX = "hadamard_patch_rotation"
 RIPAChannel = Literal["row", "col"]
 
 

@@ -16,7 +16,7 @@ Sequence on a 6x6 grid:
     Phase 3 (2t0..3t0): atom 4 (4,3)->(2,3)  row-left
 
 Usage:
-    python trial/vis_example.py
+    python example/draw_timestep/vis_example.py
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -45,9 +45,9 @@ from src.visualization_stack_time import (
 N = 6
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 2.0
-OUTPUT_PATH = ROOT / "trial" / "vis_example.png"
-PER_TIMESTEP_DIR = ROOT / "trial" / "vis_example_per_timestep"
-PER_TIMESTEP_3D_DIR = ROOT / "trial" / "vis_example_per_timestep_3d"
+OUTPUT_PATH = ROOT / "example" / "draw_timestep" / "vis_example.png"
+PER_TIMESTEP_DIR = ROOT / "example" / "draw_timestep" / "vis_example_per_timestep"
+PER_TIMESTEP_3D_DIR = ROOT / "example" / "draw_timestep" / "vis_example_per_timestep_3d"
 
 
 def save_per_timestep_frames(

@@ -58,14 +58,14 @@ Here we demonstrate an inversion of a `1x6` atom array.
 
 ### Patch rotation
 
-The RIPA shows its power in more complex, 2d routing problems. For example, a **logical hardmard gate for a surface code** includes a transversal hardmard for each atoms, followed by a patch rotation that exchanges the rough and smooth boundaries.
+The RIPA shows its power in more complex, 2d routing problems. For example, a **logical hadamard gate for a surface code** includes a transversal hadamard for each atoms, followed by a patch rotation that exchanges the rough and smooth boundaries.
 
 The patch rotation can be implemented with a set of horizontally aligned 2D-ADO together with an extra set of 2D-AOD ([Zihan Chen, et al.](https://arxiv.org/pdf/2412.01391)), diagonally
 aligned.
 
 With RIPA-native movements, we can implement the patch rotation in much shorter time.
 
-![hardmard patch rotation](demo/hardmard_patch_rotation.gif)
+![hadamard patch rotation](demo/hadamard_patch_rotation.gif)
 
 
 ### Code cultivation
@@ -75,7 +75,7 @@ With RIPA-native movements, we can implement the patch rotation in much shorter 
 
 ## How does a RIPA transportation work
 
-![eom hardmard rotation demo](demo/hardmard_patch_rotation_tones.gif)
+![eom hadamard rotation demo](demo/hadamard_patch_rotation_tones.gif)
 
 **What is so different about a RIPA ?**
 - It can move atoms independently in an arbitrary pattern (continuously along the cartesian grid).

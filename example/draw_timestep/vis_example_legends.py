@@ -21,7 +21,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -46,7 +46,7 @@ from src.visualization_stack_time import (
 N = 6
 GRID_SPACING_UM = 5.0
 COLLISION_RADIUS_UM = 2.0
-OUT_2D = ROOT / "trial" / "vis_example_legends_2d.png"
+OUT_2D = ROOT / "example" / "draw_timestep" / "vis_example_legends_2d.png"
 
 # Single source of truth for swatch colors. The StackTimeStyle below
 # keys off these so the legend always matches the rendered scene.
