@@ -241,7 +241,7 @@ def draw_routing_request(
                 arrowstyle="->",
                 color=color,
                 lw=1.6,
-                alpha=0.75,
+                alpha=1.0,
                 shrinkA=4,
                 shrinkB=4,
             ),

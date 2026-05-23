@@ -48,8 +48,8 @@ from src.visualization import render_animation
 N = 24
 PATCH_SIDE = 5
 STORAGE_PERIOD = 3
-GRID_SPACING_UM = 5.0
-COLLISION_RADIUS_UM = 3.0
+GRID_SPACING_UM = 3.0
+COLLISION_RADIUS_UM = 1.0
 
 PREFIX = "hadamard_patch_rotation"
 RIPAChannel = Literal["row", "col"]
@@ -619,29 +619,35 @@ def main() -> None:
         return
 
     by_name = {r.name: r.sequence for r in results if r.sequence is not None}
-    panels = {name: by_name[name] for name in SCHEDULERS}
+    all_panels = {name: by_name[name] for name in SCHEDULERS}
+    pair_panels = {
+        name: by_name[name] for name in ("RIPA asynchronous", "AOD H rotation")
+    }
 
     if args.demo:
-        out_path = ROOT / "demo" / f"{PREFIX}.gif"
-        quality = "quality"
+        outputs = [
+            (all_panels, ROOT / "demo" / f"{PREFIX}.gif", "quality"),
+            (pair_panels, ROOT / "render" / f"{PREFIX}_pair.gif", "quality"),
+        ]
     else:
-        out_path = ROOT / "render" / f"{PREFIX}.gif"
-        quality = "speed"
+        outputs = [(all_panels, ROOT / "render" / f"{PREFIX}.gif", "speed")]
 
-    render_animation(
-        panels,
-        out_path,
-        view="benchmark",
-        quality=quality,
-        time_dilation=1e4,
-        hold_seconds=1.5,
-        atom_colors=patch_rotation_colors(src),
-        show_routing_on_start=True,
-        show_color_code=True,
-        panel_speedup={"AOD H rotation": 8.0},
-        title=f"Hadamard patch rotation ({PATCH_SIDE}x{PATCH_SIDE})",
-    )
-    print(f"wrote {out_path}")
+    for panels, out_path, quality in outputs:
+        render_animation(
+            panels,
+            out_path,
+            view="benchmark",
+            quality=quality,
+            time_dilation=1e4,
+            hold_seconds=1.5,
+            atom_colors=patch_rotation_colors(src),
+            show_routing_on_start=True,
+            show_color_code=True,
+            panel_speedup={"AOD H rotation": 8.0},
+            trap_scale=0.6,
+            title=f"Hadamard patch rotation ({PATCH_SIDE}x{PATCH_SIDE})",
+        )
+        print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":

@@ -89,30 +89,33 @@ def main() -> None:
         return
 
     by_name = {r.name: r.sequence for r in results}
-    panels = {name: by_name[name] for name in SCHEDULERS}
+    all_panels = {name: by_name[name] for name in SCHEDULERS}
+    pair_panels = {name: by_name[name] for name in ("RIPA Naive", "AOD Tetris")}
 
     if args.demo:
-        out_path = ROOT / "demo" / f"{PREFIX}.gif"
-        quality = "quality"
+        outputs = [
+            (all_panels, ROOT / "demo" / f"{PREFIX}.gif", "quality"),
+            (pair_panels, ROOT / "render" / f"{PREFIX}_pair.gif", "quality"),
+        ]
     else:
-        out_path = ROOT / "render" / f"{PREFIX}.gif"
-        quality = "speed"
+        outputs = [(all_panels, ROOT / "render" / f"{PREFIX}.gif", "speed")]
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    render_animation(
-        panels,
-        out_path,
-        view="benchmark",
-        quality=quality,
-        time_dilation=8e3,
-        hold_seconds=1.5,
-        atom_colors={idx: "gray" for idx in range(N * N)},
-        title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
-        panel_speedup={"AOD Tetris": 4.0, "AOD sqrt-time": 4.0},
-        atom_scale=1.0,
-        trap_scale=0.65,
-    )
-    print(f"wrote {out_path}")
+    for panels, out_path, quality in outputs:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        render_animation(
+            panels,
+            out_path,
+            view="benchmark",
+            quality=quality,
+            time_dilation=8e3,
+            hold_seconds=1.5,
+            atom_colors={idx: "gray" for idx in range(N * N)},
+            title=f"RIPA vs AOD - defect-free assembly ({TARGET_SIDE}x{TARGET_SIDE})",
+            panel_speedup={"AOD Tetris": 4.0, "AOD sqrt-time": 4.0},
+            atom_scale=1.0,
+            trap_scale=0.65,
+        )
+        print(f"wrote {out_path}")
 
 
 if __name__ == "__main__":
