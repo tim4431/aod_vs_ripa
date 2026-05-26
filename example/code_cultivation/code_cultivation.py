@@ -55,8 +55,8 @@ from example.code_cultivation.code_cultivation_sequence import (
 # leaves enough room to visit a CZ site locally without running through a
 # nearby resting atom.
 LOGICAL_PITCH = 4.0
-GRID_OFFSET = 12.0
-GRID = Grid(N=48, d=5.0, rc=2.0)
+GRID_OFFSET = 1
+GRID = Grid(N=11, d=3.0, rc=0.5)
 
 GATE_SEPARATION = 1.0
 LANE_CLEARANCE = 1.25
