@@ -58,6 +58,7 @@ HOLD_SECONDS = 1.0
 TRAP_SCALE = 1.0
 ATOM_SCALE = 2.0
 ATOM_EDGE_LINEWIDTH = 2.0
+BG_COLOR = "#f2f2f2"
 
 
 def _channel_rgba(channel: str | None) -> tuple[float, float, float, float] | None:
@@ -135,7 +136,7 @@ def _render_frame(sequence: MovingSequence, t: float) -> Image.Image:
     fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, constrained_layout=True)
     draw_panel(ax, sequence, t)
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", facecolor="white")
+    fig.savefig(buf, format="png", facecolor=BG_COLOR)
     plt.close(fig)
     buf.seek(0)
     img = Image.open(buf)
@@ -150,7 +151,7 @@ def _build_palette(frames: list[Image.Image]) -> Image.Image:
     col_frame = frames[max(0, n // 4)]
     row_frame = frames[min(n - 1, (3 * n) // 4)]
     combined = Image.new(
-        "RGB", (col_frame.width, col_frame.height + row_frame.height), "white",
+        "RGB", (col_frame.width, col_frame.height + row_frame.height), BG_COLOR,
     )
     combined.paste(col_frame, (0, 0))
     combined.paste(row_frame, (0, col_frame.height))
