@@ -41,7 +41,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.atom_config import AtomConfig, Grid  # noqa: E402
-from src.movement import AODStep, Step  # noqa: E402
+from src.movement import AODStep, RIPAStep, Step  # noqa: E402
 from src.moving_sequence import MovingSequence  # noqa: E402
 from src.segments import QUINTIC_MIN_JERK, make_hold  # noqa: E402
 from src.visualization import (  # noqa: E402
@@ -69,8 +69,8 @@ INITIAL: dict[str, tuple[float, float]] = {
     "a10": (7.0, 3.0),  "a11": (7.0, 7.0),
 }
 
-CZ_DWELL = 120.0e-6            # CZ pulse window; atoms hold still throughout (s)
-CZ_VIZ_RAMP = 30.0e-6          # quintic ramp-in + ramp-out at each end of the dwell (s)
+CZ_DWELL = 50.0e-6            # CZ pulse window; atoms hold still throughout (s)
+CZ_VIZ_RAMP = 10.0e-6          # quintic ramp-in + ramp-out at each end of the dwell (s)
 BLOCKADE_RADIUS_UM = 1.4       # dashed-ring radius around each CZ atom (um)
 
 
@@ -80,16 +80,16 @@ BLOCKADE_RADIUS_UM = 1.4       # dashed-ring radius around each CZ atom (um)
 
 SCRIPT_RIPA: list[list[tuple]] = [
     # === Fig. A1 tick 2: 4 parallel CZs (single-leg movers) ===
-    [("mv", "r01", (1, 8)),("mv", "r11", (5, 2)),
+    [("mv", "r01", (1, 8)),("mv", "r10", (5, 4)),
     ("mv", "r21", (9, 2)),("mv", "r12", (8, 9))],
     [("cz", "r01", "r02"), ("cz", "r11", "r10"),
      ("cz", "r12", "r22"), ("cz", "r20", "r21")],
-    [("mv", "r01", (1, 5)), ("mv", "r11", (5, 5)),
-     ("mv", "r21", (9, 5)), ("mv", "r12", (5, 9))],
-
+    [("mv", "r01", (1, 5)), ("mv", "r11", (2, 5)),
+     ("mv", "r10", (5, 8)),
+     ("mv", "r21", (9, 5)), ("mv", "r12", (5, 9)),
     # === Fig. A1 tick 3: r01 short, r10 takes a clearance lane around r11.
     # We share batch 1 with both atoms; r10's longer route then trails on its own.
-    [("mv", "r11", (2, 5)), ("mv", "r10", (5, 8))],
+    ],
     [("cz", "r01", "r11"), ("cz", "r10", "r12")],
     [("mv", "r10", (5, 1)), ("mv", "r11", (5, 5))],
 
@@ -154,11 +154,10 @@ SCRIPT_AOD: list[list[tuple]] = [
     [("mv", "r20", (6, 1))],
     [("mv", "r20", (6, 5))],
     [("cz", "r01", "r12"), ("cz", "r00", "r10"), ("cz", "r20", "r11")],
-    [("mv", "r01", (4, 5))],
-    [("mv", "r00", (1, 1))],
-    [("mv", "r01", (1, 5))],
     [("mv", "r20", (6, 1))],
     [("mv", "r20", (9, 1))],
+    [("mv", "r01", (4, 5))],
+    [("mv", "r00", (1, 1)), ("mv", "r01", (1, 5))],
 
     # === Fig. A1 tick 5: lone CZ ===
     [("mv", "r10", (8, 1))],
@@ -337,15 +336,69 @@ def build_sequence() -> tuple[MovingSequence, dict[str, int]]:
     return seq, name_to_id
 
 
+def build_sequence_ripa() -> tuple[MovingSequence, dict[str, int]]:
+    """Same SCRIPT pattern as `build_sequence`, but each "mv" op compiles to a
+    single-atom RIPAStep on the row or col EOM channel (derived from the move
+    direction). RIPA naturally moves any number of disjoint atoms in parallel
+    -- they just share the sync_batch start_time, each on its own channel."""
+    names = list(INITIAL)
+    name_to_id = {name: idx for idx, name in enumerate(names)}
+    positions = np.asarray([INITIAL[n] for n in names], dtype=float)
+    initial = AtomConfig(positions=positions, atom_ids=np.arange(len(names)))
+    seq = MovingSequence(grid=GRID, initial=initial, collision_dt=1e-7)
+
+    for batch in SCRIPT_RIPA:
+        t0 = seq.next_start_time()
+        mvs = [op for op in batch if op[0] == "mv"]
+        czs = [op for op in batch if op[0] == "cz"]
+        unknown = [op for op in batch if op[0] not in ("mv", "cz")]
+        if unknown:
+            raise ValueError(f"unknown op kind {unknown[0][0]!r}")
+
+        steps: list[Step] = []
+        for _, name, target in mvs:
+            aid = name_to_id[name]
+            current = seq.ensemble.atomtraj_by_id(aid).resting_position_at(t0)
+            di = float(target[0]) - float(current[0])
+            dj = float(target[1]) - float(current[1])
+            if abs(di) > 1e-9 and abs(dj) > 1e-9:
+                raise ValueError(
+                    f"RIPA move {name!r} at t={t0 * 1e6:.3f}us: "
+                    f"{current} -> {target} crosses both row and col axes; "
+                    f"RIPA needs a single-axis target per step"
+                )
+            channel = "row" if abs(di) > 1e-9 else "col"
+            steps.append(
+                RIPAStep(
+                    start_time=t0,
+                    atom_id=aid,
+                    target=(float(target[0]), float(target[1])),
+                    channel=channel,
+                )
+            )
+        for _, a, b in czs:
+            steps.append(
+                CZDwellStep(
+                    start_time=t0,
+                    atom_ids=(name_to_id[a], name_to_id[b]),
+                    duration=CZ_DWELL,
+                    label=f"CZ {a}-{b}",
+                )
+            )
+        seq.append_sync_batch(steps)
+    return seq, name_to_id
+
+
 # ----------------------------------------------------------------------------- #
 # Render
 # ----------------------------------------------------------------------------- #
 
-FIGSIZE = (5.5, 5.5)
+PANEL_WIDTH = 5.5
+PANEL_HEIGHT = 5.5
 DPI = 120
 FPS = 24
 TIME_DILATION = 8.0e3
-HOLD_SECONDS = 0.8
+HOLD_SECONDS = 1.5
 BG_COLOR = "#f7f7f7"
 CZ_RING_RGBA = (0.85, 0.18, 0.18, 0.90)
 CZ_BEAM_RGBA = (0.96, 0.55, 0.10, 0.70)
@@ -367,8 +420,8 @@ def _cz_envelope(step: CZDwellStep, t: float) -> float:
     return 1.0
 
 
-def _render_frame(seq: MovingSequence, atom_colors: list, t: float) -> Image.Image:
-    fig, ax = plt.subplots(figsize=FIGSIZE, dpi=DPI, constrained_layout=True)
+def _draw_panel(ax, seq: MovingSequence, atom_colors: list, t: float) -> None:
+    """Draw one MovingSequence onto `ax` at physics time `t`."""
     ensemble = seq.ensemble
     grid = ensemble.grid
 
@@ -377,7 +430,8 @@ def _render_frame(seq: MovingSequence, atom_colors: list, t: float) -> Image.Ima
     # Red Gaussian trap halo around any atom that is currently moving, and
     # around every empty AOD trap intersection (Cartesian product addresses
     # that don't hold an atom) -- same "quality" addressed_style as
-    # src/visualization.draw_traps.
+    # src/visualization.draw_traps. RIPA steps have no selected_axis_*, so
+    # `_active_aod_traps_xy` naturally returns nothing for the RIPA panel.
     moving_xy = []
     for atom in ensemble.atomtrajs:
         for seg in atom.segments:
@@ -441,7 +495,30 @@ def _render_frame(seq: MovingSequence, atom_colors: list, t: float) -> Image.Ima
         atom_scale=1.8, edge_linewidth=1.4,
     )
     draw_grid_frame(ax, grid)
-    ax.set_title(f"t = {t * 1e6:7.1f} us", fontsize=10, loc="right")
+
+
+def _render_frame(
+    panels: list[tuple[str, MovingSequence]],
+    atom_colors: list,
+    t: float,
+) -> Image.Image:
+    n = len(panels)
+    fig, axes = plt.subplots(
+        1, n, figsize=(PANEL_WIDTH * n, PANEL_HEIGHT),
+        dpi=DPI, constrained_layout=True,
+    )
+    axes_list = [axes] if n == 1 else list(axes)
+    for ax, (label, seq) in zip(axes_list, panels):
+        # Freeze each panel's clock at its own total_duration so the panel
+        # that finishes first stops ticking while the longer one keeps going.
+        t_panel = min(t, seq.total_duration()) if t > 0 else t
+        _draw_panel(ax, seq, atom_colors, t_panel)
+        clock = max(0.0, t_panel)
+        suffix = " (done)" if t > seq.total_duration() else ""
+        ax.set_title(
+            f"{label}    t = {clock * 1e6:7.1f} us{suffix}",
+            fontsize=11,
+        )
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor=BG_COLOR)
@@ -452,14 +529,14 @@ def _render_frame(seq: MovingSequence, atom_colors: list, t: float) -> Image.Ima
     return img.convert("RGB")
 
 
-def render_gif(seq: MovingSequence, name_to_id: dict[str, int], out_path: Path) -> None:
+def render_gif(
+    panels: list[tuple[str, MovingSequence]],
+    atom_colors: list,
+    out_path: Path,
+) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    atom_colors = [
-        ("#4c78a8" if name.startswith("r") else "#f58518")
-        for name, _ in sorted(name_to_id.items(), key=lambda kv: kv[1])
-    ]
 
-    total = seq.total_duration()
+    total = max(seq.total_duration() for _, seq in panels)
     frame_dt = 1.0 / (TIME_DILATION * FPS)
     n_frames = max(2, int(math.ceil(total / frame_dt)) + 1)
     times = np.linspace(0.0, total, n_frames)
@@ -469,10 +546,10 @@ def render_gif(seq: MovingSequence, name_to_id: dict[str, int], out_path: Path) 
     frames: list[Image.Image] = []
     durations: list[int] = []
     if hold_ms > 0:
-        frames.append(_render_frame(seq, atom_colors, -1e-9))
+        frames.append(_render_frame(panels, atom_colors, -1e-9))
         durations.append(hold_ms)
     for t in tqdm(times, desc="render frames", unit="frame"):
-        frames.append(_render_frame(seq, atom_colors, float(t)))
+        frames.append(_render_frame(panels, atom_colors, float(t)))
         durations.append(frame_ms)
     if hold_ms > 0:
         durations[-1] += hold_ms
@@ -486,7 +563,7 @@ def render_gif(seq: MovingSequence, name_to_id: dict[str, int], out_path: Path) 
     quantized[0].save(
         out_path,
         save_all=True, append_images=quantized[1:],
-        duration=durations, loop=0, optimize=True,
+        duration=durations, loop=0, optimize=False, disposal=2,
     )
     for img in frames:
         img.close()
@@ -496,20 +573,37 @@ def render_gif(seq: MovingSequence, name_to_id: dict[str, int], out_path: Path) 
 
 
 def main() -> None:
-    seq, name_to_id = build_sequence()
-    report = seq.validate(dt=1e-7)
-    if not report.ok:
-        raise RuntimeError(report)
+    aod_seq, name_to_id = build_sequence()
+    ripa_seq, _ = build_sequence_ripa()
+    for label, seq in (("AOD", aod_seq), ("RIPA", ripa_seq)):
+        report = seq.validate(dt=1e-7)
+        if not report.ok:
+            raise RuntimeError(f"{label}: {report}")
 
-    n_cz = sum(1 for s in seq.steps if isinstance(s, CZDwellStep))
-    n_aod = sum(1 for s in seq.steps if isinstance(s, AODStep))
     print(f"atoms: {len(name_to_id)}")
-    print(f"sync batches: {len(SCRIPT_AOD)}")
-    print(f"AOD steps: {n_aod}   CZ steps: {n_cz}")
-    print(f"duration: {seq.total_duration() * 1e6:.3f} us")
+    for label, seq, script in (
+        ("AOD", aod_seq, SCRIPT_AOD),
+        ("RIPA", ripa_seq, SCRIPT_RIPA),
+    ):
+        n_aod = sum(1 for s in seq.steps if isinstance(s, AODStep))
+        n_ripa = sum(1 for s in seq.steps if isinstance(s, RIPAStep))
+        n_cz = sum(1 for s in seq.steps if isinstance(s, CZDwellStep))
+        kind = f"AOD={n_aod}" if n_aod else f"RIPA={n_ripa}"
+        print(
+            f"  {label}: {len(script)} batches, {kind}, CZ={n_cz}, "
+            f"duration={seq.total_duration() * 1e6:.3f} us"
+        )
 
+    atom_colors = [
+        ("#4c78a8" if name.startswith("r") else "#f58518")
+        for name, _ in sorted(name_to_id.items(), key=lambda kv: kv[1])
+    ]
     out_path = ROOT / "render" / "code_cultivation_manual.gif"
-    render_gif(seq, name_to_id, out_path)
+    render_gif(
+        [("AOD", aod_seq), ("RIPA", ripa_seq)],
+        atom_colors,
+        out_path,
+    )
     print(f"wrote {out_path}")
 
 
