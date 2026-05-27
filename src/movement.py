@@ -31,7 +31,7 @@ from typing import Literal
 
 from .atom_config import clean_position, is_integer_position
 from .atom_trajectory import AtomEnsemble
-from .segments import bang_bang_duration, make_const_acc_segment
+from .segments import bang_bang_duration, make_const_acc_segment, make_hold
 
 # --- physical-acceleration ceiling ------------------------------------------
 #
@@ -252,3 +252,45 @@ class RIPAStep(Step):
         L = math.hypot(di, dj)
         a = grid_accel_from_phys(PHYS_A_MAX, ensemble.grid.d)
         return self.start_time + bang_bang_duration(L, a)
+
+
+# --- gate (stationary pulse on a set of atoms) ------------------------------
+
+
+@dataclass
+class GateStep(Step):
+    """A gate pulse: hold a set of atoms parked at their rest sites for
+    `duration` while the (global or local) laser does its thing.
+
+    Hardware-agnostic and gate-agnostic — single-qubit rotations, CZ, CCZ,
+    or any global Rydberg pulse all boil down to "freeze these atoms here
+    for this long." The motion compiler doesn't care which gate it is;
+    `gate_type`/`label` are metadata for downstream tooling (visualization,
+    scheduling reports). The renderer in
+    `src.visualization.draw_gate_overlay` duck-types on `atom_ids` +
+    `start_time` + `duration`.
+    """
+
+    start_time: float
+    atom_ids: tuple[int, ...]
+    duration: float
+    gate_type: str = "CZ"
+    label: str = ""
+    channel: str = "aod"
+
+    def apply(self, ensemble: AtomEnsemble) -> None:
+        if self.duration <= 0.0:
+            return
+        segments = []
+        for atom_id in self.atom_ids:
+            pos = ensemble.atomtraj_by_id(atom_id).resting_position_at(
+                self.start_time
+            )
+            segments.append(
+                (atom_id, make_hold(pos, self.start_time, self.duration,
+                                    channel=self.channel))
+            )
+        ensemble.append_segments_batch(segments)
+
+    def end_time(self, ensemble: AtomEnsemble) -> float:
+        return self.start_time + max(0.0, float(self.duration))

@@ -31,7 +31,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.colors import to_rgba  # noqa: E402
-from matplotlib.patches import Rectangle  # noqa: E402
+from matplotlib.patches import Circle, Rectangle  # noqa: E402
 
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
@@ -69,7 +69,13 @@ Z_MOTION_DOT = 2.7      # motion blur fade dots
 Z_TRAP_BLOB = 4.0       # soft red gaussian halo (under atoms)
 Z_ATOM = 5.0            # atom marker
 Z_TRAP_OUTLINE = 6.0    # ring around addressed atom / square for empty AOD trap
+Z_GATE_OVERLAY = 6.5    # dashed Rydberg-blockade ring + beam blob for active gate
 Z_ATOM_ID = 7.0         # atom-id text label
+
+GATE_BLOCKADE_RADIUS_UM = 1.4
+GATE_RING_RGBA = (0.85, 0.18, 0.18, 0.90)
+GATE_BEAM_RGBA = (0.96, 0.55, 0.10, 0.70)
+GATE_RAMP_TIME = 10.0e-6
 
 DEMO_FIGSIZE = (5.4, 5.2)
 DETAIL_FIGSIZE = (12.0, 6.2)
@@ -211,6 +217,91 @@ def draw_traps(
                 facecolors="none", edgecolors="#d62728",
                 linewidths=1.1, alpha=0.70, zorder=Z_TRAP_OUTLINE,
             )
+
+
+def draw_gate_overlay(
+    ax: Any,
+    sequence: Any,
+    t: float,
+    *,
+    gate_type: str = "CZ",
+    blockade_radius_um: float = GATE_BLOCKADE_RADIUS_UM,
+    ring_rgba: tuple[float, float, float, float] = GATE_RING_RGBA,
+    beam_rgba: tuple[float, float, float, float] = GATE_BEAM_RGBA,
+    ramp_time: float = GATE_RAMP_TIME,
+) -> None:
+    """For each currently-active gate pulse whose `gate_type` matches the
+    `gate_type` argument, draw dashed Rydberg-blockade rings around its
+    participating atoms plus a Gaussian "beam" blob at their midpoint.
+
+    Steps are recognized by duck typing: any item in `sequence.steps`
+    carrying `atom_ids` (a non-empty tuple), `start_time`, `duration`, and
+    matching `gate_type` is treated as a gate pulse -- matches
+    `src.movement.GateStep`. `AODStep`/`RIPAStep` have no `gate_type`, so
+    they're skipped. This blockade-ring + beam style is the canonical CZ
+    look; other gate types should be rendered by a different primitive
+    (call this function again with a different `gate_type` + colors, or
+    layer your own overlay).
+
+    Intensity follows a linear ramp-in -> plateau -> ramp-out envelope
+    sized by `ramp_time`, all contained within `[start_time, start_time +
+    duration]` so the overlay only appears once the prior move has ended.
+    """
+    ensemble = getattr(sequence, "ensemble", None)
+    steps = getattr(sequence, "steps", None)
+    if ensemble is None or not steps:
+        return
+    grid = ensemble.grid
+
+    for step in steps:
+        if getattr(step, "gate_type", None) != gate_type:
+            continue
+        atom_ids = getattr(step, "atom_ids", None)
+        start_time = getattr(step, "start_time", None)
+        duration = getattr(step, "duration", None)
+        if not atom_ids or start_time is None or duration is None:
+            continue
+        intensity = _gate_envelope(
+            float(start_time), float(duration), float(t), ramp_time,
+        )
+        if intensity <= 0.0:
+            continue
+        ij = np.asarray(
+            [ensemble.atomtraj_by_id(aid).position_at(t) for aid in atom_ids],
+            dtype=float,
+        )
+        xy = grid.ij_to_xy(ij)
+        rrgba = (ring_rgba[0], ring_rgba[1], ring_rgba[2], ring_rgba[3] * intensity)
+        for x, y in xy:
+            ax.add_patch(
+                Circle(
+                    (float(x), float(y)),
+                    blockade_radius_um,
+                    fill=False, linestyle="--", linewidth=1.6,
+                    edgecolor=rrgba, zorder=Z_GATE_OVERLAY,
+                )
+            )
+        mid_x, mid_y = xy.mean(axis=0)
+        brgba = (beam_rgba[0], beam_rgba[1], beam_rgba[2], beam_rgba[3] * intensity)
+        _draw_gaussian_blob(
+            ax, float(mid_x), float(mid_y), trap_scale=1.6, rgba=brgba,
+        )
+
+
+def _gate_envelope(start: float, duration: float, t: float, ramp_time: float) -> float:
+    """0 -> linear ramp-in -> plateau -> linear ramp-out -> 0, contained in
+    `[start, start + duration]` so the ramp-in only fires after the prior
+    move has actually ended."""
+    end = start + duration
+    if t < start or t >= end:
+        return 0.0
+    elapsed = t - start
+    remaining = end - t
+    if elapsed < ramp_time:
+        return elapsed / ramp_time
+    if remaining < ramp_time:
+        return remaining / ramp_time
+    return 1.0
 
 
 def draw_routing_request(
@@ -499,6 +590,7 @@ def draw_atom_panel(
             ax, sequence, t, addressed_style=addressed_style,
             trap_scale=trap_scale,
         )
+        draw_gate_overlay(ax, sequence, t)
     draw_grid_frame(ax, ensemble.grid)
     ax.set_title(title or f"atom motion  -  t = {_format_time_us(t)}")
 
