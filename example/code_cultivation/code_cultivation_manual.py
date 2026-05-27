@@ -374,7 +374,7 @@ def main() -> None:
         idx: ("#4c78a8" if name.startswith("r") else "#54a24b")
         for name, idx in name_to_id.items()
     }
-    out_path = ROOT / "render" / "code_cultivation_manual.gif"
+    out_path = ROOT / "demo" / "code_cultivation_manual.gif"
     render_animation(
         # Dict order = panel order (left -> right): RIPA on the left, AOD right.
         {"RIPA": ripa_seq, "AOD": aod_seq},

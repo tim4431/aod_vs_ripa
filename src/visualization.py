@@ -1367,6 +1367,63 @@ def _infer_render_format(path: Path) -> RenderFormat:
     )
 
 
+_GIF_PALETTE_SAMPLES = 16  # frames to stratify-sample for palette construction
+_GIF_PALETTE_COLORS = 256
+
+
+def _build_gif_palette(
+    frame_paths: list[Path],
+    n_samples: int = _GIF_PALETTE_SAMPLES,
+    n_colors: int = _GIF_PALETTE_COLORS,
+) -> Image.Image:
+    """Build a GIF palette from a stratified sample across the animation.
+
+    Median-cut on a single frame is unstable for animations whose colors
+    appear only on a few short frames -- e.g. a 30 us CZ pulse in a 3000 us
+    run only colors ~6 of ~640 frames orange, and a single mid-animation
+    sample almost always misses it, so the orange gets snapped to the
+    nearest in-palette neighbor (red). Sampling `n_samples` evenly-spaced
+    frames (including endpoints) and stacking them into one composite makes
+    every phase -- motion, CZ pulses, hold-frame overlays -- contribute to
+    the cluster budget proportional to its on-screen time. 256 colors
+    leaves headroom over PIL's default 128.
+    """
+    if not frame_paths:
+        raise ValueError("no frames to build palette from")
+    n_samples = max(1, min(n_samples, len(frame_paths)))
+    if n_samples == 1:
+        sample_indices = [0]
+    else:
+        sample_indices = sorted({
+            int(round(k * (len(frame_paths) - 1) / (n_samples - 1)))
+            for k in range(n_samples)
+        })
+
+    samples: list[Image.Image] = []
+    try:
+        for idx in sample_indices:
+            with Image.open(frame_paths[idx]) as raw:
+                samples.append(raw.convert("RGB").copy())
+        width = samples[0].width
+        total_height = sum(img.height for img in samples)
+        composite = Image.new("RGB", (width, total_height), "white")
+        y = 0
+        for img in samples:
+            composite.paste(img, (0, y))
+            y += img.height
+        try:
+            return composite.quantize(
+                colors=n_colors,
+                method=Image.Quantize.MEDIANCUT,
+                dither=Image.Dither.NONE,
+            )
+        finally:
+            composite.close()
+    finally:
+        for img in samples:
+            img.close()
+
+
 def _save_animation(
     frame_paths: list[Path],
     output_path: Path,
@@ -1377,9 +1434,11 @@ def _save_animation(
 ) -> None:
     """Stitch PNG frames into an animation in `fmt`.
 
-    GIF goes through a shared 128-color palette (from the middle frame) so
-    `optimize=True` can encode inter-frame diffs, then `gifsicle -O3` if
-    available. WebP/APNG keep RGBA and rely on the codec.
+    GIF goes through a shared 256-color palette built by median-cut on a
+    stratified composite of frames spanning the whole run (see
+    `_build_gif_palette`), then `gifsicle -O3` if available. Per-frame
+    quantization uses Floyd-Steinberg so soft Gaussian halos retain their
+    gradient instead of banding. WebP/APNG keep RGBA and rely on the codec.
     """
     if not frame_paths:
         raise ValueError("no frames to save")
@@ -1388,14 +1447,9 @@ def _save_animation(
 
     palette: Image.Image | None = None
     if fmt == "gif":
-        with Image.open(frame_paths[len(frame_paths) // 2]) as ref:
-            palette = ref.convert("RGB").quantize(
-                colors=128,
-                method=Image.Quantize.MEDIANCUT,
-                dither=Image.Dither.NONE,
-            )
+        palette = _build_gif_palette(frame_paths)
         convert = lambda raw: raw.convert("RGB").quantize(
-            palette=palette, dither=Image.Dither.NONE,
+            palette=palette, dither=Image.Dither.FLOYDSTEINBERG,
         )
         save_kwargs: dict[str, Any] = dict(loop=0, optimize=True)
     elif fmt == "webp":

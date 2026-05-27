@@ -70,7 +70,9 @@ With RIPA-native movements, we can implement the patch rotation in much shorter 
 
 ### Code cultivation
 
+Modern magic state factory benefits from [Fold-transversal surface code cultivation](https://arxiv.org/pdf/2509.05212), which needs complicated atom movements.
 
+![code cultivation](demo/code_cultivation_manual.gif)
 
 
 ## How does a RIPA transportation work
