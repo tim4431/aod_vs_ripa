@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import sys
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.atom_config import AtomConfig, Grid  # noqa: E402
+from src.drawing import draw_reg3_color_code_pattern  # noqa: E402
 from src.movement import AODStep, GateStep, RIPAStep, Step  # noqa: E402
 from src.moving_sequence import MovingSequence  # noqa: E402
 from src.visualization import render_animation  # noqa: E402
@@ -55,6 +57,7 @@ INITIAL: dict[str, tuple[float, float]] = {
 CZ_DWELL = 30.0e-6            # CZ pulse window; atoms hold still throughout (s)
 CZ_VIZ_RAMP = 6.0e-6          # quintic ramp-in + ramp-out at each end of the dwell (s)
 BLOCKADE_RADIUS_UM = 1.4       # dashed-ring radius around each CZ atom (um)
+LOGICAL_PITCH = 4.0            # grid units between adjacent r* data qubits
 
 
 # ----------------------------------------------------------------------------- #
@@ -368,7 +371,7 @@ def main() -> None:
         )
 
     atom_colors = {
-        idx: ("#4c78a8" if name.startswith("r") else "#f58518")
+        idx: ("#4c78a8" if name.startswith("r") else "#54a24b")
         for name, idx in name_to_id.items()
     }
     out_path = ROOT / "render" / "code_cultivation_manual.gif"
@@ -384,6 +387,11 @@ def main() -> None:
         atom_scale=1.5,
         trap_scale=0.8,
         show_routing_on_start=False,
+        # Reg(3) checkerboard overlay only on the trailing hold frame
+        # (when each panel hits its own total_duration). `partial` is
+        # picklable, so the worker pool can ship this callback to the
+        # frame processes without trouble.
+        end_overlay=partial(draw_reg3_color_code_pattern, pitch=LOGICAL_PITCH),
         panel_speedup={"AOD": 2.0},
         title="AOD vs RIPA - code-cultivation Rot(3) init + Rot(3)->Reg(3)",
     )

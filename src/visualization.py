@@ -24,7 +24,7 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 import matplotlib
 
@@ -49,6 +49,14 @@ AddressedStyle = Literal["edge", "blob", "both", "none"]
 RenderView = Literal["demo", "benchmark", "detail"]
 RenderQuality = Literal["speed", "quality"]
 RenderFormat = Literal["gif", "webp", "apng"]
+
+# Callback used to paint an extra layer on a single atom-panel axes. Called
+# with (ax, ensemble) once per panel on the start hold or the trailing
+# (finished) hold; the panel passes its OWN ensemble so per-panel overlays
+# (e.g. a Reg(3) code overlay drawn only when that panel reaches its end)
+# work naturally in the benchmark view. Must be picklable -- use a module-
+# level function or `functools.partial` of one for the worker pool.
+PanelOverlay = Callable[[Any, AtomEnsemble], None]
 
 ATOM_SIZE = 40.0
 GRIDPOINT_SIZE = 12.0
@@ -542,6 +550,9 @@ def draw_atom_panel(
     show_routing: bool = False,
     show_color_code: bool = False,
     color_code_swap: bool = False,
+    start_overlay: PanelOverlay | None = None,
+    end_overlay: PanelOverlay | None = None,
+    is_start_hold: bool = False,
     title: str | None = None,
     atom_scale: float = 1.0,
     trap_scale: float = 1.0,
@@ -569,6 +580,10 @@ def draw_atom_panel(
 
     if draw_overlay:
         draw_color_code_pattern(ax, ensemble, swap_colors=color_code_swap)
+    if is_start_hold and start_overlay is not None:
+        start_overlay(ax, ensemble)
+    if finished and end_overlay is not None:
+        end_overlay(ax, ensemble)
     draw_grid_dots(ax, ensemble.grid)
     if show_routing:
         draw_routing_request(ax, ensemble, colors=colors)
@@ -631,6 +646,9 @@ def draw_frame(
     show_routing: bool = False,
     show_color_code: bool = False,
     color_code_swap: bool = False,
+    start_overlay: PanelOverlay | None = None,
+    end_overlay: PanelOverlay | None = None,
+    is_start_hold: bool = False,
     title: str | None = None,
     atom_scale: float = 1.0,
     trap_scale: float = 1.0,
@@ -647,7 +665,7 @@ def draw_frame(
             ax, motion, t, quality=quality, atom_colors=atom_colors,
             planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing,
-            show_color_code=show_color_code, color_code_swap=color_code_swap,
+            show_color_code=show_color_code, color_code_swap=color_code_swap, start_overlay=start_overlay, end_overlay=end_overlay, is_start_hold=is_start_hold,
             title=title, atom_scale=atom_scale, trap_scale=trap_scale,
         )
         return fig, [ax]
@@ -682,7 +700,7 @@ def draw_frame(
                 ax, panel_motion, panel_t, quality=quality, atom_colors=atom_colors,
                 planned_trajectory=planned_trajectory,
                 show_atom_ids=show_atom_ids, show_routing=show_routing,
-                show_color_code=show_color_code, color_code_swap=color_code_swap,
+                show_color_code=show_color_code, color_code_swap=color_code_swap, start_overlay=start_overlay, end_overlay=end_overlay, is_start_hold=is_start_hold,
                 title=f"{label}{speed_tag}",
                 atom_scale=atom_scale, trap_scale=trap_scale,
             )
@@ -719,7 +737,7 @@ def draw_frame(
             atom_ax, motion, t, quality=quality, atom_colors=atom_colors,
             planned_trajectory=planned_trajectory,
             show_atom_ids=show_atom_ids, show_routing=show_routing,
-            show_color_code=show_color_code, color_code_swap=color_code_swap,
+            show_color_code=show_color_code, color_code_swap=color_code_swap, start_overlay=start_overlay, end_overlay=end_overlay, is_start_hold=is_start_hold,
             title=None, atom_scale=atom_scale, trap_scale=trap_scale,
         )
         draw_current_tones(row_now, ensemble, t, "row", colors=colors)
@@ -770,6 +788,9 @@ def render_animation(
     show_atom_ids: bool = False,
     show_routing_on_start: bool = True,
     show_color_code: bool = False,
+    show_color_code_on_start: bool = True,
+    start_overlay: PanelOverlay | None = None,
+    end_overlay: PanelOverlay | None = None,
     title: str | None = None,
     show_progress: bool = True,
     fmt: RenderFormat | None = None,
@@ -839,28 +860,30 @@ def render_animation(
     frame_dur_ms = max(1, int(round(1000.0 / fps)))
     hold_ms = max(0, int(round(hold_seconds * 1000.0)))
     has_routing_frame = bool(show_routing_on_start and hold_ms > 0)
-    has_start_overlay = bool(show_color_code and hold_ms > 0)
+    has_start_overlay = bool(
+        show_color_code and show_color_code_on_start and hold_ms > 0
+    )
+    needs_real_start_t = (
+        has_routing_frame or has_start_overlay or start_overlay is not None
+    )
 
-    # Plan tuple: (t, show_routing, show_color_code, color_code_swap).
+    # Plan tuple: (t, show_routing, show_color_code, color_code_swap, is_start_hold).
     # Start hold draws the un-swapped overlay on every panel (the
     # initial code state). During motion `color_code_swap=True` lets
     # each panel pick up the swapped overlay independently the moment
     # its own ensemble finishes; the last moving frame thus already
     # has every panel finished and overlaid, so the trailing hold is
     # just an extended duration on that frame.
-    plan: list[tuple[float, bool, bool, bool]] = []
+    plan: list[tuple[float, bool, bool, bool, bool]] = []
     durations: list[int] = []
-    if has_routing_frame or has_start_overlay:
-        plan.append((float(moving_times[0]), has_routing_frame, has_start_overlay, False))
-        durations.append(hold_ms)
-    elif hold_ms > 0:
-        # Intro hold without routing arrows or overlay: render slightly
-        # before t=0 so no segments are active and `draw_traps` finds
-        # nothing to draw.
-        plan.append((-1e-9, False, False, False))
+    if hold_ms > 0:
+        # If nothing on the start hold needs a "real" render, dip below 0 so
+        # no segments are active and `draw_traps` finds nothing to draw.
+        start_t = float(moving_times[0]) if needs_real_start_t else -1e-9
+        plan.append((start_t, has_routing_frame, has_start_overlay, False, True))
         durations.append(hold_ms)
     for t in moving_times:
-        plan.append((float(t), False, show_color_code, True))
+        plan.append((float(t), False, show_color_code, True, False))
         durations.append(frame_dur_ms)
     if hold_ms > 0:
         durations[-1] += hold_ms
@@ -873,10 +896,13 @@ def render_animation(
         show_atom_ids=show_atom_ids, title=title,
         atom_scale=atom_scale, trap_scale=trap_scale,
         panel_speedup=dict(panel_speedup) if panel_speedup is not None else None,
+        start_overlay=start_overlay,
+        end_overlay=end_overlay,
     )
 
-    items: list[tuple[int, float, bool, bool, bool]] = [
-        (k, t, sr, scc, swap) for k, (t, sr, scc, swap) in enumerate(plan)
+    items: list[tuple[int, float, bool, bool, bool, bool]] = [
+        (k, t, sr, scc, swap, ish)
+        for k, (t, sr, scc, swap, ish) in enumerate(plan)
     ]
     n_workers = min(os.cpu_count() or 1, len(items))
 
@@ -1296,15 +1322,17 @@ def _frame_worker_init(
     _FRAME_WORKER["tmp_path"] = Path(tmp_path_str)
 
 
-def _frame_worker_render(item: tuple[int, float, bool, bool, bool]) -> str:
-    k, t, show_routing, show_color_code, color_code_swap = item
+def _frame_worker_render(item: tuple[int, float, bool, bool, bool, bool]) -> str:
+    k, t, show_routing, show_color_code, color_code_swap, is_start_hold = item
     # Plan invariant in `render_animation`: motion frames carry
-    # color_code_swap=True; the start-hold frame carries False. End-of-run
-    # idleness is implicit via panel_t saturating at panel_total.
+    # color_code_swap=True; the start-hold frame carries False AND
+    # is_start_hold=True. End-of-run idleness is implicit via panel_t
+    # saturating at panel_total.
     fig, _ = draw_frame(
         _FRAME_WORKER["motion"], float(t),
         show_routing=show_routing, show_color_code=show_color_code,
-        color_code_swap=color_code_swap, frame_index=int(k),
+        color_code_swap=color_code_swap, is_start_hold=is_start_hold,
+        frame_index=int(k),
         is_motion_frame=bool(color_code_swap),
         **_FRAME_WORKER["draw_kwargs"],
     )
