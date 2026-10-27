@@ -16,7 +16,7 @@ DEMOS = [
     "example/defect_free_assembly/defect_free_assembly_benchmark.py",
     "example/inversion_ripa_aod.py",
     "example/inversion_6x6_benchmark.py",
-    "example/random_routing_tones_demo.py",
+    "example/hadamard_rotation/hadamard_patch_rotation_tones.py",
 ]
 
 
